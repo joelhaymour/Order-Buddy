@@ -1,6 +1,7 @@
 import {
   calculateArrivalDate,
   calculateBulkReadyDate,
+  calculateSampleArrivalDate,
   clampNumber,
 } from "@/lib/date-utils";
 import type {
@@ -47,6 +48,11 @@ export function getDropDayName(dropDays: DropDay[], dropDayId: string | null) {
 }
 
 export function getProductTimeline(product: Product) {
+  const sampleArrivalDate = calculateSampleArrivalDate(
+    product.sampleOrderedAt,
+    product.sampleProductionDays,
+    product.sampleShippingDays,
+  );
   const bulkReadyDate = calculateBulkReadyDate(
     product.bulkStartDate,
     product.productionDays,
@@ -58,6 +64,7 @@ export function getProductTimeline(product: Product) {
   );
 
   return {
+    sampleArrivalDate,
     bulkReadyDate,
     arrivalDate,
   };
