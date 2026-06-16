@@ -14,11 +14,13 @@ create table if not exists public.products (
   sku text not null default '',
   category text not null,
   supplier text not null default '',
+  image_path text,
   status text not null check (status in ('idea', 'sample', 'bulk', 'canceled')),
   drop_day_id uuid references public.drop_days(id) on delete set null,
   notes text not null default '',
   sample_ordered_at date,
-  sample_approved_at date,
+  sample_production_days integer not null default 0,
+  sample_shipping_days integer not null default 0,
   bulk_start_date date,
   production_days integer not null default 0,
   shipping_days integer not null default 0,
@@ -83,3 +85,46 @@ for all
 to authenticated
 using (true)
 with check (true);
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'product-images',
+  'product-images',
+  true,
+  5242880,
+  array['image/png', 'image/jpeg', 'image/webp', 'image/gif']
+)
+on conflict (id) do update
+set
+  public = excluded.public,
+  file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists "authenticated users can upload product images" on storage.objects;
+create policy "authenticated users can upload product images"
+on storage.objects
+for insert
+to authenticated
+with check (bucket_id = 'product-images');
+
+drop policy if exists "authenticated users can view product images" on storage.objects;
+create policy "authenticated users can view product images"
+on storage.objects
+for select
+to authenticated
+using (bucket_id = 'product-images');
+
+drop policy if exists "authenticated users can update product images" on storage.objects;
+create policy "authenticated users can update product images"
+on storage.objects
+for update
+to authenticated
+using (bucket_id = 'product-images')
+with check (bucket_id = 'product-images');
+
+drop policy if exists "authenticated users can delete product images" on storage.objects;
+create policy "authenticated users can delete product images"
+on storage.objects
+for delete
+to authenticated
+using (bucket_id = 'product-images');

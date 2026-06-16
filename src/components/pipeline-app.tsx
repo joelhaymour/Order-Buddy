@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import {
   addMonths,
   eachDayOfInterval,
@@ -29,6 +29,7 @@ import {
 
 import {
   calculateArrivalDate,
+  calculateSampleArrivalDate,
   calculateBulkReadyDate,
   currency,
   daysUntil,
@@ -43,7 +44,12 @@ import {
   getProductTotalCost,
   getStatusLabel,
 } from "@/lib/pipeline-helpers";
-import { getSupabaseBrowserClient, isSupabaseConfigured } from "@/lib/supabase";
+import {
+  getProductImageUrl,
+  getSupabaseBrowserClient,
+  isSupabaseConfigured,
+  productImagesBucket,
+} from "@/lib/supabase";
 import type {
   AppData,
   AuthMode,
@@ -61,6 +67,7 @@ import { cn, createId } from "@/lib/utils";
 
 type View = "dashboard" | "products" | "calendar" | "drops";
 type Scope = "all" | string;
+type ProductLayout = "board" | "list";
 
 type DropDayRow = {
   id: string;
@@ -76,11 +83,13 @@ type ProductRow = {
   sku: string;
   category: string;
   supplier: string;
+  image_path: string | null;
   status: ProductStatus;
   drop_day_id: string | null;
   notes: string | null;
   sample_ordered_at: string | null;
-  sample_approved_at: string | null;
+  sample_production_days: number | null;
+  sample_shipping_days: number | null;
   bulk_start_date: string | null;
   production_days: number | null;
   shipping_days: number | null;
@@ -112,11 +121,13 @@ const emptyProductDraft: ProductDraft = {
   sku: "",
   category: "",
   supplier: "",
+  imagePath: null,
   status: "idea",
   dropDayId: null,
   notes: "",
   sampleOrderedAt: null,
-  sampleApprovedAt: null,
+  sampleProductionDays: 0,
+  sampleShippingDays: 0,
   bulkStartDate: null,
   productionDays: 0,
   shippingDays: 0,
@@ -154,11 +165,13 @@ function mapProductRow(row: ProductRow): Product {
     sku: row.sku,
     category: row.category,
     supplier: row.supplier,
+    imagePath: row.image_path,
     status: row.status,
     dropDayId: row.drop_day_id,
     notes: row.notes ?? "",
     sampleOrderedAt: row.sample_ordered_at,
-    sampleApprovedAt: row.sample_approved_at,
+    sampleProductionDays: row.sample_production_days ?? 0,
+    sampleShippingDays: row.sample_shipping_days ?? 0,
     bulkStartDate: row.bulk_start_date,
     productionDays: row.production_days ?? 0,
     shippingDays: row.shipping_days ?? 0,
@@ -187,11 +200,13 @@ function toProductRow(product: Product) {
     sku: product.sku,
     category: product.category,
     supplier: product.supplier,
+    image_path: product.imagePath,
     status: product.status,
     drop_day_id: product.dropDayId,
     notes: product.notes,
     sample_ordered_at: product.sampleOrderedAt,
-    sample_approved_at: product.sampleApprovedAt,
+    sample_production_days: product.sampleProductionDays,
+    sample_shipping_days: product.sampleShippingDays,
     bulk_start_date: product.bulkStartDate,
     production_days: product.productionDays,
     shipping_days: product.shippingDays,
@@ -208,11 +223,77 @@ function getScopeLabel(scope: Scope, dropDays: DropDay[]) {
   return dropDays.find((drop) => drop.id === scope)?.name ?? "Selected drop";
 }
 
+function getProductPrimaryMilestone(product: Product) {
+  const timeline = getProductTimeline(product);
+
+  if (product.status === "idea") {
+    return {
+      label: "Target drop",
+      date: product.targetLaunchDate,
+    };
+  }
+
+  if (product.status === "sample") {
+    return {
+      label: "Sample arrival",
+      date: timeline.sampleArrivalDate,
+    };
+  }
+
+  if (product.status === "bulk") {
+    return timeline.arrivalDate
+      ? {
+          label: "Arrival",
+          date: timeline.arrivalDate,
+        }
+      : {
+          label: "Bulk ready",
+          date: timeline.bulkReadyDate,
+        };
+  }
+
+  return {
+    label: "Last update",
+    date: product.updatedAt.slice(0, 10),
+  };
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error("Unable to read the selected image."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function buildProductImagePath(productId: string, fileName: string) {
+  const extension = fileName.includes(".") ? fileName.split(".").pop() ?? "jpg" : "jpg";
+  const baseName = fileName
+    .replace(/\.[^/.]+$/, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+
+  return `${productId}/${Date.now()}-${baseName || "product-image"}.${extension.toLowerCase()}`;
+}
+
+function isStoredProductImagePath(imagePath: string | null | undefined) {
+  return Boolean(
+    imagePath &&
+      !imagePath.startsWith("data:") &&
+      !imagePath.startsWith("http://") &&
+      !imagePath.startsWith("https://"),
+  );
+}
+
 export function PipelineApp() {
   const authMode: AuthMode = isSupabaseConfigured() ? "supabase" : "demo";
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
 
   const [view, setView] = useState<View>("dashboard");
+  const [productLayout, setProductLayout] = useState<ProductLayout>("board");
   const [scope, setScope] = useState<Scope>("all");
   const [data, setData] = useState<AppData>(createEmptyAppData());
   const [productDraft, setProductDraft] = useState<ProductDraft>(emptyProductDraft);
@@ -424,7 +505,7 @@ export function PipelineApp() {
     setError("");
 
     const newDropDay: DropDay = {
-      id: createId("drop"),
+      id: createId(),
       name: dropDraft.name,
       targetDate: dropDraft.targetDate,
       description: dropDraft.description,
@@ -481,7 +562,7 @@ export function PipelineApp() {
     setError("");
 
     const newProduct: Product = {
-      id: createId("product"),
+      id: createId(),
       ...productDraft,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -523,18 +604,7 @@ export function PipelineApp() {
     setMessage("Product added.");
   }
 
-  async function handleSaveProduct() {
-    if (!productEditor) {
-      return;
-    }
-
-    setSaving(true);
-    setError("");
-    const updatedProduct = {
-      ...productEditor,
-      updatedAt: new Date().toISOString(),
-    };
-
+  async function saveProductRecord(updatedProduct: Product) {
     if (authMode === "demo") {
       await persistData(
         {
@@ -545,14 +615,11 @@ export function PipelineApp() {
         },
         updatedProduct.id,
       );
-      setSaving(false);
-      setMessage("Product updated.");
-      return;
+      return null;
     }
 
     if (!supabase) {
-      setSaving(false);
-      return;
+      return "Supabase is not configured correctly.";
     }
 
     const { error: updateError } = await supabase
@@ -561,14 +628,162 @@ export function PipelineApp() {
       .eq("id", updatedProduct.id);
 
     if (updateError) {
-      setError(updateError.message);
+      return updateError.message;
+    }
+
+    await refreshSupabaseData();
+    return null;
+  }
+
+  async function handleSaveProduct() {
+    if (!productEditor) {
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    setMessage("");
+    const updatedProduct = {
+      ...productEditor,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const saveError = await saveProductRecord(updatedProduct);
+    if (saveError) {
+      setError(saveError);
       setSaving(false);
       return;
     }
 
-    await refreshSupabaseData();
     setSaving(false);
     setMessage("Product updated.");
+  }
+
+  async function handleProductImageUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+
+    if (!file || !productEditor) {
+      return;
+    }
+
+    if (!file.type.startsWith("image/")) {
+      setError("Please choose an image file.");
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      setError("Please choose an image under 5 MB.");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    setMessage("");
+
+    if (authMode === "demo") {
+      try {
+        const imagePath = await readFileAsDataUrl(file);
+        const updatedProduct = {
+          ...productEditor,
+          imagePath,
+          updatedAt: new Date().toISOString(),
+        };
+
+        setProductEditor(updatedProduct);
+        const saveError = await saveProductRecord(updatedProduct);
+        if (saveError) {
+          setError(saveError);
+          setSaving(false);
+          return;
+        }
+
+        setSaving(false);
+        setMessage("Product image uploaded.");
+      } catch (uploadError) {
+        setError(
+          uploadError instanceof Error ? uploadError.message : "Unable to upload the image.",
+        );
+        setSaving(false);
+      }
+      return;
+    }
+
+    if (!supabase) {
+      setError("Supabase is not configured correctly.");
+      setSaving(false);
+      return;
+    }
+
+    const oldImagePath = productEditor.imagePath;
+    const nextImagePath = buildProductImagePath(productEditor.id, file.name);
+
+    const { error: uploadError } = await supabase.storage
+      .from(productImagesBucket)
+      .upload(nextImagePath, file, {
+        cacheControl: "3600",
+        upsert: true,
+      });
+
+    if (uploadError) {
+      setError(uploadError.message);
+      setSaving(false);
+      return;
+    }
+
+    const updatedProduct = {
+      ...productEditor,
+      imagePath: nextImagePath,
+      updatedAt: new Date().toISOString(),
+    };
+
+    setProductEditor(updatedProduct);
+    const saveError = await saveProductRecord(updatedProduct);
+    if (saveError) {
+      await supabase.storage.from(productImagesBucket).remove([nextImagePath]);
+      setError(saveError);
+      setSaving(false);
+      return;
+    }
+
+    if (oldImagePath && isStoredProductImagePath(oldImagePath) && oldImagePath !== nextImagePath) {
+      await supabase.storage.from(productImagesBucket).remove([oldImagePath]);
+    }
+
+    setSaving(false);
+    setMessage("Product image uploaded.");
+  }
+
+  async function handleRemoveProductImage() {
+    if (!productEditor?.imagePath) {
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    setMessage("");
+
+    const oldImagePath = productEditor.imagePath;
+    const updatedProduct = {
+      ...productEditor,
+      imagePath: null,
+      updatedAt: new Date().toISOString(),
+    };
+
+    setProductEditor(updatedProduct);
+    const saveError = await saveProductRecord(updatedProduct);
+    if (saveError) {
+      setError(saveError);
+      setSaving(false);
+      return;
+    }
+
+    if (authMode === "supabase" && supabase && oldImagePath && isStoredProductImagePath(oldImagePath)) {
+      await supabase.storage.from(productImagesBucket).remove([oldImagePath]);
+    }
+
+    setSaving(false);
+    setMessage("Product image removed.");
   }
 
   async function handleQuickStatusUpdate(productId: string, status: ProductStatus) {
@@ -626,7 +841,7 @@ export function PipelineApp() {
     setError("");
 
     const newEntry: CostEntry = {
-      id: createId("cost"),
+      id: createId(),
       productId: selectedProductId,
       title: costDraft.title,
       description: costDraft.description,
@@ -683,6 +898,14 @@ export function PipelineApp() {
       const timeline = getProductTimeline(product);
 
       return [
+        timeline.sampleArrivalDate
+          ? {
+              id: `${product.id}-sample-arrival`,
+              date: timeline.sampleArrivalDate,
+              label: `${product.name} sample arrival`,
+              type: "sample" as const,
+            }
+          : null,
         product.targetLaunchDate
           ? {
               id: `${product.id}-launch`,
@@ -903,7 +1126,12 @@ export function PipelineApp() {
             </section>
           </aside>
 
-          <main className="space-y-6">
+          <main
+            className={cn(
+              "space-y-6",
+              view === "products" && "xl:col-span-2",
+            )}
+          >
             {error ? (
               <Banner tone="error" message={error} onDismiss={() => setError("")} />
             ) : null}
@@ -1016,16 +1244,65 @@ export function PipelineApp() {
                   </div>
                 </Card>
 
-                <ProductBoard
-                  products={filteredProducts}
-                  dropDays={data.dropDays}
-                  onSelectProduct={(product) => {
-                    setSelectedProductId(product.id);
-                    setProductEditor(product);
-                  }}
-                  onMoveStatus={handleQuickStatusUpdate}
-                  selectedProductId={selectedProductId}
-                />
+                <Card title="Products Workspace">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                      <p className="text-sm text-slate-300">
+                        {filteredProducts.length} products in {getScopeLabel(scope, data.dropDays)}.
+                        Use the board to move items by stage, or switch to list view to scan a
+                        larger catalog faster.
+                      </p>
+                    </div>
+                    <div className="inline-flex rounded-2xl border border-white/10 bg-slate-900/70 p-1">
+                      <button
+                        className={cn(
+                          "rounded-xl px-4 py-2 text-sm font-medium transition",
+                          productLayout === "board"
+                            ? "bg-emerald-400 text-slate-950"
+                            : "text-slate-300 hover:bg-white/5",
+                        )}
+                        onClick={() => setProductLayout("board")}
+                      >
+                        Board view
+                      </button>
+                      <button
+                        className={cn(
+                          "rounded-xl px-4 py-2 text-sm font-medium transition",
+                          productLayout === "list"
+                            ? "bg-emerald-400 text-slate-950"
+                            : "text-slate-300 hover:bg-white/5",
+                        )}
+                        onClick={() => setProductLayout("list")}
+                      >
+                        List view
+                      </button>
+                    </div>
+                  </div>
+                </Card>
+
+                {productLayout === "board" ? (
+                  <ProductBoard
+                    products={filteredProducts}
+                    dropDays={data.dropDays}
+                    onSelectProduct={(product) => {
+                      setSelectedProductId(product.id);
+                      setProductEditor(product);
+                    }}
+                    onMoveStatus={handleQuickStatusUpdate}
+                    selectedProductId={selectedProductId}
+                  />
+                ) : (
+                  <ProductListView
+                    products={filteredProducts}
+                    dropDays={data.dropDays}
+                    onSelectProduct={(product) => {
+                      setSelectedProductId(product.id);
+                      setProductEditor(product);
+                    }}
+                    onMoveStatus={handleQuickStatusUpdate}
+                    selectedProductId={selectedProductId}
+                  />
+                )}
               </>
             ) : null}
 
@@ -1090,10 +1367,60 @@ export function PipelineApp() {
             ) : null}
           </main>
 
-          <aside className="space-y-6">
+          <aside
+            className={cn(
+              "space-y-6",
+              view === "products" && "xl:col-span-2 xl:col-start-2 xl:grid xl:grid-cols-2 xl:gap-6 xl:space-y-0",
+            )}
+          >
             <Card title="Product Detail">
               {productEditor ? (
                 <div className="space-y-4">
+                  <div className="grid gap-4 sm:grid-cols-[140px_minmax(0,1fr)]">
+                    <ProductImagePreview
+                      imagePath={productEditor.imagePath}
+                      productName={productEditor.name}
+                      variant="detail"
+                    />
+                    <div className="space-y-3 rounded-3xl border border-white/10 bg-slate-900/50 p-4">
+                      <div>
+                        <p className="text-sm font-medium text-white">Product image</p>
+                        <p className="mt-1 text-sm text-slate-400">
+                          Upload a product photo so each item is easier to recognize on the
+                          board.
+                        </p>
+                      </div>
+
+                      <label className="block">
+                        <span className="mb-2 block text-sm text-slate-300">
+                          Upload image file
+                        </span>
+                        <input
+                          className="w-full rounded-2xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-slate-200 file:mr-4 file:rounded-xl file:border-0 file:bg-emerald-400 file:px-3 file:py-2 file:text-sm file:font-medium file:text-slate-950 hover:file:bg-emerald-300"
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp,image/gif"
+                          onChange={(event) => void handleProductImageUpload(event)}
+                          disabled={saving}
+                        />
+                      </label>
+
+                      <p className="text-xs text-slate-500">
+                        PNG, JPG, WebP, or GIF up to 5 MB. The image will show on the
+                        product card and detail view.
+                      </p>
+
+                      {productEditor.imagePath ? (
+                        <button
+                          className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-70"
+                          onClick={() => void handleRemoveProductImage()}
+                          disabled={saving}
+                        >
+                          Remove image
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+
                   <div className="grid gap-3">
                     <Input
                       label="Product name"
@@ -1162,7 +1489,7 @@ export function PipelineApp() {
                         })),
                       ]}
                     />
-                    <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="grid gap-3 sm:grid-cols-3">
                       <Input
                         label="Sample ordered"
                         type="date"
@@ -1174,12 +1501,26 @@ export function PipelineApp() {
                         }
                       />
                       <Input
-                        label="Sample approved"
-                        type="date"
-                        value={productEditor.sampleApprovedAt ?? ""}
+                        label="Sample production business days"
+                        type="number"
+                        value={String(productEditor.sampleProductionDays)}
                         onChange={(value) =>
                           setProductEditor((current) =>
-                            current ? { ...current, sampleApprovedAt: value || null } : current,
+                            current
+                              ? { ...current, sampleProductionDays: Number(value || "0") }
+                              : current,
+                          )
+                        }
+                      />
+                      <Input
+                        label="Sample shipping business days"
+                        type="number"
+                        value={String(productEditor.sampleShippingDays)}
+                        onChange={(value) =>
+                          setProductEditor((current) =>
+                            current
+                              ? { ...current, sampleShippingDays: Number(value || "0") }
+                              : current,
                           )
                         }
                       />
@@ -1196,7 +1537,7 @@ export function PipelineApp() {
                         }
                       />
                       <Input
-                        label="Production days"
+                        label="Production business days"
                         type="number"
                         value={String(productEditor.productionDays)}
                         onChange={(value) =>
@@ -1208,7 +1549,7 @@ export function PipelineApp() {
                         }
                       />
                       <Input
-                        label="Shipping days"
+                        label="Shipping business days"
                         type="number"
                         value={String(productEditor.shippingDays)}
                         onChange={(value) =>
@@ -1472,7 +1813,7 @@ function DashboardView({
             ) : (
               <EmptyState
                 title="No arrival dates yet"
-                description="Once you add production and shipping lead times, estimated delivery dates will show up here."
+                description="Once you add production and shipping business-day lead times, estimated delivery dates will show up here."
               />
             )}
           </div>
@@ -1497,88 +1838,251 @@ function ProductBoard({
 }) {
   return (
     <div className="grid gap-4 xl:grid-cols-4">
-      {productStatuses.map((status) => (
-        <div
-          key={status}
-          className="rounded-[28px] border border-white/10 bg-white/5 p-4 shadow-lg shadow-black/10"
-        >
-          <div className="mb-4 flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-semibold">{getStatusLabel(status)}</h2>
-              <p className="text-xs text-slate-400">
-                {
-                  products.filter((product) => product.status === status).length
-                }{" "}
-                products
-              </p>
-            </div>
-          </div>
+      {productStatuses.map((status) => {
+        const statusProducts = products.filter((product) => product.status === status);
 
-          <div className="space-y-3">
-            {products.filter((product) => product.status === status).length ? (
-              products
-                .filter((product) => product.status === status)
-                .map((product) => {
-                  const timeline = getProductTimeline(product);
+        return (
+          <div
+            key={status}
+            className="overflow-hidden rounded-[28px] border border-white/10 bg-white/5 p-4 shadow-lg shadow-black/10"
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-semibold">{getStatusLabel(status)}</h2>
+                <p className="text-xs text-slate-400">{statusProducts.length} products</p>
+              </div>
+            </div>
+
+            <div className="space-y-3 xl:max-h-[720px] xl:overflow-y-auto xl:pr-1">
+              {statusProducts.length ? (
+                statusProducts.map((product) => {
+                  const primaryMilestone = getProductPrimaryMilestone(product);
 
                   return (
                     <button
                       key={product.id}
                       className={cn(
-                        "w-full rounded-3xl border p-4 text-left transition",
+                        "w-full rounded-3xl border p-3 text-left transition",
                         selectedProductId === product.id
                           ? "border-emerald-400/50 bg-emerald-400/10"
                           : "border-white/10 bg-slate-900/70 hover:bg-slate-900",
                       )}
                       onClick={() => onSelectProduct(product)}
                     >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="font-medium text-white">{product.name}</p>
-                          <p className="mt-1 text-xs text-slate-400">
-                            {product.sku || "No SKU"} · {product.category}
-                          </p>
-                        </div>
-                        <span className="rounded-full border border-white/10 px-2 py-1 text-[11px] uppercase tracking-[0.16em] text-slate-300">
-                          {currency(getProductTotalCost(product))}
-                        </span>
-                      </div>
-
-                      <div className="mt-4 space-y-2 text-sm text-slate-300">
-                        <p>{getDropDayName(dropDays, product.dropDayId)}</p>
-                        {timeline.bulkReadyDate ? (
-                          <p>Bulk ready: {formatDate(timeline.bulkReadyDate)}</p>
-                        ) : null}
-                        {timeline.arrivalDate ? (
-                          <p>Arrival: {formatDate(timeline.arrivalDate)}</p>
-                        ) : null}
-                      </div>
-
-                      <div className="mt-4">
-                        <Select
-                          label="Move to"
-                          value={product.status}
-                          onChange={(value) =>
-                            void onMoveStatus(product.id, value as ProductStatus)
-                          }
-                          options={productStatuses.map((item) => ({
-                            value: item,
-                            label: getStatusLabel(item),
-                          }))}
+                      <div className="flex items-start gap-3">
+                        <ProductImagePreview
+                          imagePath={product.imagePath}
+                          productName={product.name}
+                          variant="card"
                         />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="truncate font-medium text-white">{product.name}</p>
+                              <p className="mt-1 truncate text-xs text-slate-400">
+                                {product.category}
+                                {product.sku ? ` · ${product.sku}` : ""}
+                              </p>
+                            </div>
+                            <span className="shrink-0 rounded-full border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300">
+                              {currency(getProductTotalCost(product))}
+                            </span>
+                          </div>
+
+                          <p className="mt-2 truncate text-xs text-slate-500">
+                            {getDropDayName(dropDays, product.dropDayId)}
+                          </p>
+
+                          <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] px-3 py-2">
+                            <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                              {primaryMilestone.label}
+                            </p>
+                            <p className="mt-1 text-sm font-medium text-slate-100">
+                              {formatDate(primaryMilestone.date)}
+                            </p>
+                          </div>
+
+                          <div className="mt-3">
+                            <Select
+                              label="Move to"
+                              value={product.status}
+                              onChange={(value) =>
+                                void onMoveStatus(product.id, value as ProductStatus)
+                              }
+                              options={productStatuses.map((item) => ({
+                                value: item,
+                                label: getStatusLabel(item),
+                              }))}
+                              compact
+                            />
+                          </div>
+                        </div>
                       </div>
                     </button>
                   );
                 })
-            ) : (
-              <EmptyState
-                title={`No ${getStatusLabel(status).toLowerCase()} products`}
-                description="Move products here as they progress through the workflow."
-              />
-            )}
+              ) : (
+                <EmptyState
+                  title={`No ${getStatusLabel(status).toLowerCase()} products`}
+                  description="Move products here as they progress through the workflow."
+                />
+              )}
+            </div>
           </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ProductListView({
+  products,
+  dropDays,
+  onSelectProduct,
+  onMoveStatus,
+  selectedProductId,
+}: {
+  products: ProductWithCosts[];
+  dropDays: DropDay[];
+  onSelectProduct: (product: ProductWithCosts) => void;
+  onMoveStatus: (productId: string, status: ProductStatus) => void;
+  selectedProductId: string | null;
+}) {
+  return (
+    <Card title="Products List">
+      <div className="overflow-x-auto rounded-3xl border border-white/10 bg-slate-900/60">
+        <div className="grid grid-cols-[minmax(0,2.2fr)_0.9fr_1.3fr_1.3fr_0.9fr_0.9fr] gap-3 border-b border-white/10 px-4 py-3 text-[11px] uppercase tracking-[0.18em] text-slate-500">
+          <div>Product</div>
+          <div>Status</div>
+          <div>Drop</div>
+          <div>Next date</div>
+          <div>Cost</div>
+          <div>Move</div>
         </div>
-      ))}
+
+        <div className="max-h-[720px] overflow-y-auto">
+          {products.length ? (
+            products.map((product) => {
+              const primaryMilestone = getProductPrimaryMilestone(product);
+
+              return (
+                <div
+                  key={product.id}
+                  className={cn(
+                    "grid grid-cols-[minmax(0,2.2fr)_0.9fr_1.3fr_1.3fr_0.9fr_0.9fr] items-center gap-3 border-b border-white/5 px-4 py-3 transition",
+                    selectedProductId === product.id && "bg-emerald-400/10",
+                  )}
+                >
+                  <button
+                    className="flex min-w-0 items-center gap-3 text-left"
+                    onClick={() => onSelectProduct(product)}
+                  >
+                    <ProductImagePreview
+                      imagePath={product.imagePath}
+                      productName={product.name}
+                      variant="list"
+                    />
+                    <div className="min-w-0">
+                      <p className="truncate font-medium text-white">{product.name}</p>
+                      <p className="truncate text-xs text-slate-400">
+                        {product.category}
+                        {product.sku ? ` · ${product.sku}` : ""}
+                      </p>
+                    </div>
+                  </button>
+
+                  <div>
+                    <span className="rounded-full border border-white/10 px-2 py-1 text-[11px] text-slate-200">
+                      {getStatusLabel(product.status)}
+                    </span>
+                  </div>
+
+                  <div className="truncate text-sm text-slate-300">
+                    {getDropDayName(dropDays, product.dropDayId)}
+                  </div>
+
+                  <div className="min-w-0">
+                    <p className="truncate text-xs uppercase tracking-[0.16em] text-slate-500">
+                      {primaryMilestone.label}
+                    </p>
+                    <p className="truncate text-sm text-slate-100">
+                      {formatDate(primaryMilestone.date)}
+                    </p>
+                  </div>
+
+                  <div className="text-sm font-medium text-slate-100">
+                    {currency(getProductTotalCost(product))}
+                  </div>
+
+                  <div>
+                    <Select
+                      label="Move to"
+                      value={product.status}
+                      onChange={(value) =>
+                        void onMoveStatus(product.id, value as ProductStatus)
+                      }
+                      options={productStatuses.map((item) => ({
+                        value: item,
+                        label: getStatusLabel(item),
+                      }))}
+                      compact
+                    />
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <div className="p-6">
+              <EmptyState
+                title="No products yet"
+                description="Add a product to start building your catalog view."
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function ProductImagePreview({
+  imagePath,
+  productName,
+  variant,
+}: {
+  imagePath: string | null;
+  productName: string;
+  variant: "card" | "detail" | "list";
+}) {
+  const imageUrl = getProductImageUrl(imagePath);
+  const sizeClasses =
+    variant === "card"
+      ? "h-14 w-14 shrink-0 rounded-2xl"
+      : variant === "list"
+        ? "h-12 w-12 shrink-0 rounded-2xl"
+        : "h-36 w-full rounded-3xl sm:h-full";
+
+  if (!imageUrl) {
+    return (
+      <div
+        className={cn(
+          "flex items-center justify-center border border-dashed border-white/10 bg-slate-900/60 text-[11px] uppercase tracking-[0.2em] text-slate-500",
+          sizeClasses,
+        )}
+      >
+        No image
+      </div>
+    );
+  }
+
+  return (
+    <div className={cn("overflow-hidden border border-white/10 bg-slate-900/60", sizeClasses)}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={imageUrl}
+        alt={`${productName} preview`}
+        className="h-full w-full object-cover"
+      />
     </div>
   );
 }
@@ -1592,7 +2096,12 @@ function CalendarView({
   calendarMonth: Date;
   onPrevious: () => void;
   onNext: () => void;
-  items: { id: string; date: string; label: string; type: "drop" | "bulk" | "arrival" | "drop-day" }[];
+  items: {
+    id: string;
+    date: string;
+    label: string;
+    type: "sample" | "drop" | "bulk" | "arrival" | "drop-day";
+  }[];
 }) {
   const calendarStart = startOfWeek(startOfMonth(calendarMonth), { weekStartsOn: 0 });
   const calendarEnd = endOfWeek(endOfMonth(calendarMonth), { weekStartsOn: 0 });
@@ -1672,6 +2181,7 @@ function CalendarView({
                       key={event.id}
                       className={cn(
                         "rounded-2xl px-3 py-2 text-xs font-medium",
+                        event.type === "sample" && "bg-cyan-400/15 text-cyan-100",
                         event.type === "arrival" && "bg-sky-400/15 text-sky-100",
                         event.type === "bulk" && "bg-amber-400/15 text-amber-100",
                         event.type === "drop" && "bg-violet-400/15 text-violet-100",
@@ -1763,6 +2273,11 @@ function DropDayOverview({
 }
 
 function TimelineSummary({ product }: { product: Product }) {
+  const sampleArrivalDate = calculateSampleArrivalDate(
+    product.sampleOrderedAt,
+    product.sampleProductionDays,
+    product.sampleShippingDays,
+  );
   const bulkReadyDate = calculateBulkReadyDate(product.bulkStartDate, product.productionDays);
   const arrivalDate = calculateArrivalDate(
     product.bulkStartDate,
@@ -1770,17 +2285,29 @@ function TimelineSummary({ product }: { product: Product }) {
     product.shippingDays,
   );
 
+  const sampleCountdown = daysUntil(sampleArrivalDate);
   const bulkCountdown = daysUntil(bulkReadyDate);
   const arrivalCountdown = daysUntil(arrivalDate);
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2">
+    <div className="grid gap-3 sm:grid-cols-3">
+      <div className="rounded-2xl border border-white/10 bg-slate-900/70 p-4">
+        <p className="text-xs uppercase tracking-[0.16em] text-slate-400">
+          Estimated sample arrival
+        </p>
+        <p className="mt-2 text-lg font-semibold text-white">{formatDate(sampleArrivalDate)}</p>
+        <p className="mt-1 text-sm text-slate-400">
+          {sampleCountdown === null
+            ? "Add sample ordered date plus production and shipping business days."
+            : `${sampleCountdown} days from today`}
+        </p>
+      </div>
       <div className="rounded-2xl border border-white/10 bg-slate-900/70 p-4">
         <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Estimated bulk ready</p>
         <p className="mt-2 text-lg font-semibold text-white">{formatDate(bulkReadyDate)}</p>
         <p className="mt-1 text-sm text-slate-400">
           {bulkCountdown === null
-            ? "Add a bulk start date and production lead time."
+            ? "Add a bulk start date and production business-day lead time."
             : `${bulkCountdown} days from today`}
         </p>
       </div>
@@ -1789,7 +2316,7 @@ function TimelineSummary({ product }: { product: Product }) {
         <p className="mt-2 text-lg font-semibold text-white">{formatDate(arrivalDate)}</p>
         <p className="mt-1 text-sm text-slate-400">
           {arrivalCountdown === null
-            ? "Add shipping days to estimate delivery."
+            ? "Add shipping business days to estimate delivery."
             : `${arrivalCountdown} days from today`}
         </p>
       </div>
@@ -1979,17 +2506,22 @@ function Select({
   value,
   onChange,
   options,
+  compact = false,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   options: { value: string; label: string }[];
+  compact?: boolean;
 }) {
   return (
     <label className="block">
-      <span className="mb-2 block text-sm text-slate-300">{label}</span>
+      {!compact ? <span className="mb-2 block text-sm text-slate-300">{label}</span> : null}
       <select
-        className="w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400"
+        className={cn(
+          "w-full rounded-2xl border border-white/10 bg-slate-900 text-sm text-white outline-none transition focus:border-emerald-400",
+          compact ? "px-3 py-2.5" : "px-4 py-3",
+        )}
         value={value}
         onChange={(event) => onChange(event.target.value)}
       >
