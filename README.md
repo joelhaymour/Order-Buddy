@@ -66,3 +66,5 @@ This app is set up well for Vercel:
 4. Deploy.
 
 Once deployed with Supabase configured, both users can sign in and work in the same shared product pipeline.
+
+If you connect the repository to Vercel for automatic Git-based deploys, make sure new commits use the same email address as your GitHub account so Vercel can identify the author correctly.
