@@ -15,6 +15,7 @@ Order Buddy is a private internal product pipeline app for a golf apparel busine
 - `Drop Days` overview for organizing products into planned releases
 - `Calendar` view for delivery and schedule visibility
 - `Product Detail` editing panel for notes, dates, lead times, and costs
+- `Product images` with file upload and preview thumbnails
 - `Supabase`-ready auth and data model, plus demo mode when env vars are not set
 
 ## Local development
@@ -42,6 +43,18 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
 
 5. Restart the app.
 6. Use the sign-up screen to create the first two user accounts for you and your business partner.
+
+If you are adding product images to an existing project that already ran the original schema, also run:
+
+```bash
+supabase/product-images.sql
+```
+
+If you are updating an existing project to track sample production and shipping lead times, also run:
+
+```bash
+supabase/sample-timeline.sql
+```
 
 ## Deployment
 

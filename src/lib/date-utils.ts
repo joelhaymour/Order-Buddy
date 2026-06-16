@@ -1,4 +1,10 @@
-import { addDays, differenceInCalendarDays, format, isValid, parseISO } from "date-fns";
+import {
+  addBusinessDays,
+  differenceInCalendarDays,
+  format,
+  isValid,
+  parseISO,
+} from "date-fns";
 
 export function formatDate(date: string | null | undefined, fallback = "Not set") {
   if (!date) {
@@ -21,7 +27,18 @@ export function calculateBulkReadyDate(
     return null;
   }
 
-  return format(addDays(parseISO(bulkStartDate), productionDays), "yyyy-MM-dd");
+  return format(addBusinessDays(parseISO(bulkStartDate), productionDays), "yyyy-MM-dd");
+}
+
+export function calculateBusinessDateFromStart(
+  startDate: string | null,
+  businessDays: number,
+) {
+  if (!startDate || businessDays <= 0) {
+    return null;
+  }
+
+  return format(addBusinessDays(parseISO(startDate), businessDays), "yyyy-MM-dd");
 }
 
 export function calculateArrivalDate(
@@ -34,7 +51,24 @@ export function calculateArrivalDate(
     return bulkReadyDate;
   }
 
-  return format(addDays(parseISO(bulkReadyDate), shippingDays), "yyyy-MM-dd");
+  return calculateBusinessDateFromStart(bulkReadyDate, shippingDays);
+}
+
+export function calculateSampleArrivalDate(
+  sampleOrderedAt: string | null,
+  sampleProductionDays: number,
+  sampleShippingDays: number,
+) {
+  const sampleReadyDate = calculateBusinessDateFromStart(
+    sampleOrderedAt,
+    sampleProductionDays,
+  );
+
+  if (!sampleReadyDate || sampleShippingDays <= 0) {
+    return sampleReadyDate;
+  }
+
+  return calculateBusinessDateFromStart(sampleReadyDate, sampleShippingDays);
 }
 
 export function daysUntil(date: string | null | undefined) {
