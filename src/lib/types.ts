@@ -24,6 +24,13 @@ export type ActivityEntry = {
   createdAt: string;
 };
 
+export type CalendarNoteEvent = {
+  id: string;
+  title: string;
+  notes: string;
+  date: string;
+};
+
 export type UserRecord = {
   id: string;
   email: string;
@@ -36,6 +43,7 @@ export type DropDay = {
   targetDate: string;
   description: string;
   archived: boolean;
+  customEvents: CalendarNoteEvent[];
   createdAt: string;
 };
 

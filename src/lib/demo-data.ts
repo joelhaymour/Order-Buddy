@@ -14,6 +14,14 @@ const dropDays: DropDay[] = [
     targetDate: iso(48),
     description: "Late-summer polos and lightweight outerwear.",
     archived: false,
+    customEvents: [
+      {
+        id: "event-august-shoot",
+        title: "Summer drop photoshoot",
+        notes: "Book photographer and sample the full outfit lineup before editing week.",
+        date: iso(18),
+      },
+    ],
     createdAt: new Date().toISOString(),
   },
   {
@@ -22,6 +30,7 @@ const dropDays: DropDay[] = [
     targetDate: iso(94),
     description: "Cool-weather layers and premium basics.",
     archived: false,
+    customEvents: [],
     createdAt: new Date().toISOString(),
   },
 ];

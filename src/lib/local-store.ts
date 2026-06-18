@@ -9,22 +9,33 @@ function canUseStorage() {
   return typeof window !== "undefined";
 }
 
+function normalizeAppData(data: AppData): AppData {
+  return {
+    ...data,
+    dropDays: data.dropDays.map((dropDay) => ({
+      ...dropDay,
+      archived: Boolean(dropDay.archived),
+      customEvents: Array.isArray(dropDay.customEvents) ? dropDay.customEvents : [],
+    })),
+  };
+}
+
 export function loadLocalData(): AppData {
   if (!canUseStorage()) {
-    return demoData;
+    return normalizeAppData(demoData);
   }
 
   const raw = window.localStorage.getItem(STORAGE_KEY);
   if (!raw) {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(demoData));
-    return demoData;
+    return normalizeAppData(demoData);
   }
 
   try {
-    return JSON.parse(raw) as AppData;
+    return normalizeAppData(JSON.parse(raw) as AppData);
   } catch {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(demoData));
-    return demoData;
+    return normalizeAppData(demoData);
   }
 }
 

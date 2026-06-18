@@ -53,6 +53,7 @@ import {
 } from "@/lib/supabase";
 import type {
   ActivityEntry,
+  CalendarNoteEvent,
   AppData,
   AuthMode,
   CostEntry,
@@ -79,8 +80,14 @@ type Scope = "all" | string;
 type ProductLayout = "board" | "list";
 type ProductSort = "next-action" | "name" | "cost-high" | "newest";
 type ProductStatusFilter = "all" | ProductStatus;
-type CalendarItemType = "sample" | "drop" | "bulk" | "arrival" | "drop-day";
-type CalendarItemKind = "sample-arrival" | "launch" | "bulk-ready" | "arrival" | "drop-day";
+type CalendarItemType = "sample" | "drop" | "bulk" | "arrival" | "drop-day" | "custom";
+type CalendarItemKind =
+  | "sample-arrival"
+  | "launch"
+  | "bulk-ready"
+  | "arrival"
+  | "drop-day"
+  | "custom-event";
 type CalendarItem = {
   id: string;
   date: string;
@@ -89,6 +96,8 @@ type CalendarItem = {
   kind: CalendarItemKind;
   productId: string | null;
   draggable: boolean;
+  dropDayId: string | null;
+  notes?: string;
 };
 type DrawerTab = "overview" | "timeline" | "costs" | "activity";
 type SavedFilter = {
@@ -102,6 +111,13 @@ type SavedFilter = {
 type CostEditorState = {
   id: string | null;
   draft: CostEntryDraft;
+};
+type CalendarEventDraft = {
+  id: string | null;
+  dropDayId: string;
+  title: string;
+  notes: string;
+  date: string;
 };
 type PlanningAgendaItem = {
   id: string;
@@ -206,6 +222,14 @@ const emptyCostDraft: CostEntryDraft = {
   costType: "misc",
 };
 
+const emptyCalendarEventDraft: CalendarEventDraft = {
+  id: null,
+  dropDayId: "",
+  title: "",
+  notes: "",
+  date: new Date().toISOString().slice(0, 10),
+};
+
 function mapDropDayRow(row: DropDayRow): DropDay {
   const dropMeta = parseDropDescription(row.description);
   return {
@@ -214,6 +238,7 @@ function mapDropDayRow(row: DropDayRow): DropDay {
     targetDate: row.target_date,
     description: dropMeta.description,
     archived: dropMeta.archived,
+    customEvents: dropMeta.customEvents,
     createdAt: row.created_at,
   };
 }
@@ -449,6 +474,8 @@ function getCalendarEventClasses(type: CalendarItemType) {
       return "border-sky-400/40 bg-sky-400/20 text-sky-50";
     case "drop-day":
       return "border-emerald-400/40 bg-emerald-400/20 text-emerald-50";
+    case "custom":
+      return "border-violet-400/40 bg-violet-400/20 text-violet-50";
     default:
       return "border-white/10 bg-white/5 text-slate-100";
   }
@@ -509,6 +536,7 @@ export function PipelineApp() {
   const [showProductDrawer, setShowProductDrawer] = useState(false);
   const [showAddProductModal, setShowAddProductModal] = useState(false);
   const [showAddDropModal, setShowAddDropModal] = useState(false);
+  const [showCalendarEventModal, setShowCalendarEventModal] = useState(false);
   const [productSearch, setProductSearch] = useState("");
   const [productStatusFilter, setProductStatusFilter] =
     useState<ProductStatusFilter>("all");
@@ -533,6 +561,8 @@ export function PipelineApp() {
   });
   const [calendarViewMode, setCalendarViewMode] = useState<"month" | "agenda">("month");
   const [showArchivedDrops, setShowArchivedDrops] = useState(false);
+  const [calendarEventDraft, setCalendarEventDraft] =
+    useState<CalendarEventDraft>(emptyCalendarEventDraft);
 
   const productsWithCosts = useMemo(
     () => attachCosts(data.products, data.costEntries),
@@ -801,6 +831,39 @@ export function PipelineApp() {
     setProductLayout("list");
   }
 
+  async function saveDropDayRecord(updatedDropDay: DropDay) {
+    if (authMode === "demo") {
+      const nextData = {
+        ...data,
+        dropDays: data.dropDays
+          .map((item) => (item.id === updatedDropDay.id ? updatedDropDay : item))
+          .sort((left, right) => left.targetDate.localeCompare(right.targetDate)),
+      };
+      await persistData(nextData, selectedProductId);
+      return null;
+    }
+
+    if (!supabase) {
+      return "Supabase is not configured correctly.";
+    }
+
+    const { error: updateError } = await supabase
+      .from("drop_days")
+      .update({
+        name: updatedDropDay.name,
+        target_date: updatedDropDay.targetDate,
+        description: serializeDropDescription(updatedDropDay),
+      })
+      .eq("id", updatedDropDay.id);
+
+    if (updateError) {
+      return updateError.message;
+    }
+
+    await refreshSupabaseData();
+    return null;
+  }
+
   async function toggleDropArchive(dropDayId: string, archived: boolean) {
     const dropDay = data.dropDays.find((item) => item.id === dropDayId);
     if (!dropDay) {
@@ -809,33 +872,11 @@ export function PipelineApp() {
 
     const nextDropDay = { ...dropDay, archived };
 
-    if (authMode === "demo") {
-      await persistData(
-        {
-          ...data,
-          dropDays: data.dropDays.map((item) => (item.id === dropDayId ? nextDropDay : item)),
-        },
-        selectedProductId,
-      );
-      setMessage(archived ? "Drop archived." : "Drop restored.");
+    const saveError = await saveDropDayRecord(nextDropDay);
+    if (saveError) {
+      setError(saveError);
       return;
     }
-
-    if (!supabase) {
-      return;
-    }
-
-    const { error: updateError } = await supabase
-      .from("drop_days")
-      .update({ description: serializeDropDescription(nextDropDay) })
-      .eq("id", dropDayId);
-
-    if (updateError) {
-      setError(updateError.message);
-      return;
-    }
-
-    await refreshSupabaseData();
     setMessage(archived ? "Drop archived." : "Drop restored.");
   }
 
@@ -976,6 +1017,7 @@ export function PipelineApp() {
       targetDate: dropDraft.targetDate,
       description: dropDraft.description,
       archived: false,
+      customEvents: [],
       createdAt: new Date().toISOString(),
     };
 
@@ -1308,8 +1350,132 @@ export function PipelineApp() {
     await refreshSupabaseData();
   }
 
+  function openNewCalendarEvent() {
+    setCalendarEventDraft({
+      ...emptyCalendarEventDraft,
+      dropDayId: scope === "all" ? data.dropDays[0]?.id ?? "" : scope,
+    });
+    setShowCalendarEventModal(true);
+  }
+
+  function openCalendarEventEditor(item: CalendarItem) {
+    if (item.kind !== "custom-event" || !item.dropDayId) {
+      return;
+    }
+
+    setCalendarEventDraft({
+      id: item.id,
+      dropDayId: item.dropDayId,
+      title: item.label,
+      notes: item.notes ?? "",
+      date: item.date,
+    });
+    setShowCalendarEventModal(true);
+  }
+
+  async function handleSaveCalendarEvent() {
+    if (!calendarEventDraft.dropDayId || !calendarEventDraft.title.trim() || !calendarEventDraft.date) {
+      setError("Drop day, event title, and date are required.");
+      return;
+    }
+
+    const dropDay = data.dropDays.find((item) => item.id === calendarEventDraft.dropDayId);
+    if (!dropDay) {
+      setError("Choose a valid drop day for this event.");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    setMessage("");
+
+    const nextEvent: CalendarNoteEvent = {
+      id: calendarEventDraft.id ?? createId(),
+      title: calendarEventDraft.title.trim(),
+      notes: calendarEventDraft.notes.trim(),
+      date: calendarEventDraft.date,
+    };
+
+    const previousDropDay =
+      calendarEventDraft.id
+        ? data.dropDays.find((item) =>
+            item.customEvents.some((event) => event.id === calendarEventDraft.id),
+          )
+        : null;
+
+    if (previousDropDay && previousDropDay.id !== dropDay.id) {
+      const previousSaveError = await saveDropDayRecord({
+        ...previousDropDay,
+        customEvents: previousDropDay.customEvents.filter((item) => item.id !== nextEvent.id),
+      });
+
+      if (previousSaveError) {
+        setError(previousSaveError);
+        setSaving(false);
+        return;
+      }
+    }
+
+    const nextDropDay: DropDay = {
+      ...dropDay,
+      customEvents: [
+        ...dropDay.customEvents.filter((item) => item.id !== nextEvent.id),
+        nextEvent,
+      ].sort((left, right) => left.date.localeCompare(right.date)),
+    };
+
+    const saveError = await saveDropDayRecord(nextDropDay);
+    if (saveError) {
+      setError(saveError);
+      setSaving(false);
+      return;
+    }
+
+    setShowCalendarEventModal(false);
+    setCalendarEventDraft(emptyCalendarEventDraft);
+    setSaving(false);
+    setMessage(calendarEventDraft.id ? "Calendar event updated." : "Calendar event added.");
+  }
+
+  async function handleDeleteCalendarEvent() {
+    if (!calendarEventDraft.id || !calendarEventDraft.dropDayId) {
+      return;
+    }
+
+    const dropDay = data.dropDays.find((item) => item.id === calendarEventDraft.dropDayId);
+    if (!dropDay) {
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    setMessage("");
+
+    const nextDropDay: DropDay = {
+      ...dropDay,
+      customEvents: dropDay.customEvents.filter((item) => item.id !== calendarEventDraft.id),
+    };
+
+    const saveError = await saveDropDayRecord(nextDropDay);
+    if (saveError) {
+      setError(saveError);
+      setSaving(false);
+      return;
+    }
+
+    setShowCalendarEventModal(false);
+    setCalendarEventDraft(emptyCalendarEventDraft);
+    setSaving(false);
+    setMessage("Calendar event deleted.");
+  }
+
   async function handleCalendarEventOpen(item: CalendarItem) {
     if (!item.productId) {
+      if (item.kind === "custom-event") {
+        openCalendarEventEditor(item);
+        return;
+      }
+
       if (item.kind === "drop-day") {
         const dropDayId = item.id.replace(/-drop-day$/, "");
         setScope(dropDayId);
@@ -1661,47 +1827,53 @@ export function PipelineApp() {
   }
 
   const calendarItems = useMemo(() => {
-    const productItems = filteredProducts.flatMap((product) => {
+    const productItems: CalendarItem[] = filteredProducts.flatMap((product) => {
       const timeline = getProductTimeline(product);
+      const items: CalendarItem[] = [];
 
-      return [
-        timeline.sampleArrivalDate
-          ? {
-              id: `${product.id}-sample-arrival`,
-              date: timeline.sampleArrivalDate,
-              label: `${product.name} sample arrival`,
-              type: "sample" as const,
-              kind: "sample-arrival" as const,
-              productId: product.id,
-              draggable: true,
-            }
-          : null,
-        timeline.bulkReadyDate
-          ? {
-              id: `${product.id}-bulk`,
-              date: timeline.bulkReadyDate,
-              label: `${product.name} bulk ready`,
-              type: "bulk" as const,
-              kind: "bulk-ready" as const,
-              productId: product.id,
-              draggable: true,
-            }
-          : null,
-        timeline.arrivalDate
-          ? {
-              id: `${product.id}-arrival`,
-              date: timeline.arrivalDate,
-              label: `${product.name} arrival`,
-              type: "arrival" as const,
-              kind: "arrival" as const,
-              productId: product.id,
-              draggable: true,
-            }
-          : null,
-      ].filter(Boolean);
+      if (timeline.sampleArrivalDate) {
+        items.push({
+          id: `${product.id}-sample-arrival`,
+          date: timeline.sampleArrivalDate,
+          label: `${product.name} sample arrival`,
+          type: "sample",
+          kind: "sample-arrival",
+          productId: product.id,
+          draggable: true,
+          dropDayId: product.dropDayId,
+        });
+      }
+
+      if (timeline.bulkReadyDate) {
+        items.push({
+          id: `${product.id}-bulk`,
+          date: timeline.bulkReadyDate,
+          label: `${product.name} bulk ready`,
+          type: "bulk",
+          kind: "bulk-ready",
+          productId: product.id,
+          draggable: true,
+          dropDayId: product.dropDayId,
+        });
+      }
+
+      if (timeline.arrivalDate) {
+        items.push({
+          id: `${product.id}-arrival`,
+          date: timeline.arrivalDate,
+          label: `${product.name} arrival`,
+          type: "arrival",
+          kind: "arrival",
+          productId: product.id,
+          draggable: true,
+          dropDayId: product.dropDayId,
+        });
+      }
+
+      return items;
     });
 
-    const dropItems = visibleDropDays
+    const dropItems: CalendarItem[] = visibleDropDays
       .filter((dropDay) => scope === "all" || dropDay.id === scope)
       .map((dropDay) => ({
         id: `${dropDay.id}-drop-day`,
@@ -1711,11 +1883,28 @@ export function PipelineApp() {
         kind: "drop-day" as const,
         productId: null,
         draggable: false,
+        dropDayId: dropDay.id,
       }));
 
-    return [...productItems, ...dropItems]
-      .filter((item): item is NonNullable<(typeof productItems)[number]> => Boolean(item))
-      .sort((left, right) => left.date.localeCompare(right.date));
+    const customEventItems: CalendarItem[] = visibleDropDays
+      .filter((dropDay) => scope === "all" || dropDay.id === scope)
+      .flatMap((dropDay) =>
+        dropDay.customEvents.map((event) => ({
+          id: event.id,
+          date: event.date,
+          label: event.title,
+          type: "custom" as const,
+          kind: "custom-event" as const,
+          productId: null,
+          draggable: false,
+          dropDayId: dropDay.id,
+          notes: event.notes,
+        })),
+      );
+
+    return [...productItems, ...dropItems, ...customEventItems].sort((left, right) =>
+      left.date.localeCompare(right.date),
+    );
   }, [filteredProducts, scope, visibleDropDays]);
 
   const dashboardCalendarAgenda = useMemo(() => {
@@ -2131,6 +2320,7 @@ export function PipelineApp() {
                 items={calendarItems}
                 mode={calendarViewMode}
                 onModeChange={setCalendarViewMode}
+                onAddCustomEvent={openNewCalendarEvent}
                 onEventClick={(item) => void handleCalendarEventOpen(item)}
                 onEventDrop={(item, targetDate) => void handleCalendarEventDrop(item, targetDate)}
               />
@@ -2341,6 +2531,90 @@ export function PipelineApp() {
                 <Plus className="h-4 w-4" />
                 Create drop day
               </button>
+            </div>
+          </ModalShell>
+        ) : null}
+
+        {showCalendarEventModal ? (
+          <ModalShell
+            title={calendarEventDraft.id ? "Edit Calendar Event" : "Add Calendar Event"}
+            description="Track custom schedule items like photoshoots, launch prep, approvals, or team deadlines alongside your product milestones."
+            onClose={() => {
+              setShowCalendarEventModal(false);
+              setCalendarEventDraft(emptyCalendarEventDraft);
+            }}
+          >
+            <div className="grid gap-3 md:grid-cols-2">
+              <Select
+                label="Drop day"
+                value={calendarEventDraft.dropDayId}
+                onChange={(value) =>
+                  setCalendarEventDraft((current) => ({ ...current, dropDayId: value }))
+                }
+                options={[
+                  { value: "", label: "Choose a drop day" },
+                  ...data.dropDays.map((dropDay) => ({
+                    value: dropDay.id,
+                    label: dropDay.name,
+                  })),
+                ]}
+              />
+              <Input
+                label="Date"
+                type="date"
+                value={calendarEventDraft.date}
+                onChange={(value) =>
+                  setCalendarEventDraft((current) => ({ ...current, date: value }))
+                }
+              />
+              <Input
+                label="Event title"
+                value={calendarEventDraft.title}
+                onChange={(value) =>
+                  setCalendarEventDraft((current) => ({ ...current, title: value }))
+                }
+              />
+              <div />
+              <TextArea
+                label="Notes"
+                value={calendarEventDraft.notes}
+                onChange={(value) =>
+                  setCalendarEventDraft((current) => ({ ...current, notes: value }))
+                }
+                className="md:col-span-2"
+              />
+            </div>
+            <div className="mt-6 flex flex-wrap justify-between gap-3">
+              <div>
+                {calendarEventDraft.id ? (
+                  <button
+                    className="rounded-2xl border border-rose-400/30 bg-rose-400/10 px-4 py-3 text-sm font-medium text-rose-100 transition hover:bg-rose-400/20 disabled:cursor-not-allowed disabled:opacity-70"
+                    onClick={() => void handleDeleteCalendarEvent()}
+                    disabled={saving}
+                  >
+                    Delete event
+                  </button>
+                ) : null}
+              </div>
+              <div className="flex gap-3">
+                <button
+                  className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                  onClick={() => {
+                    setShowCalendarEventModal(false);
+                    setCalendarEventDraft(emptyCalendarEventDraft);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-70"
+                  onClick={() => void handleSaveCalendarEvent()}
+                  disabled={saving}
+                >
+                  <Plus className="h-4 w-4" />
+                  {calendarEventDraft.id ? "Save event" : "Add event"}
+                </button>
+              </div>
             </div>
           </ModalShell>
         ) : null}
@@ -3401,6 +3675,7 @@ function CalendarView({
   items,
   mode,
   onModeChange,
+  onAddCustomEvent,
   onEventClick,
   onEventDrop,
 }: {
@@ -3410,6 +3685,7 @@ function CalendarView({
   items: CalendarItem[];
   mode: "month" | "agenda";
   onModeChange: (mode: "month" | "agenda") => void;
+  onAddCustomEvent: () => void;
   onEventClick: (item: CalendarItem) => void;
   onEventDrop: (item: CalendarItem, targetDate: string) => void;
 }) {
@@ -3429,42 +3705,53 @@ function CalendarView({
 
   return (
     <Card title="Calendar / Schedule">
-      <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <button
-          className="rounded-2xl border border-white/10 bg-slate-900/70 p-3 transition hover:bg-white/10"
-          onClick={onPrevious}
-        >
-          <ChevronLeft className="h-4 w-4" />
-        </button>
-        <div className="text-center">
-          <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Viewing month</p>
-          <p className="mt-1 text-xl font-semibold">{format(calendarMonth, "MMMM yyyy")}</p>
+      <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+        <div className="flex items-center gap-3">
+          <button
+            className="rounded-2xl border border-white/10 bg-slate-900/70 p-3 transition hover:bg-white/10"
+            onClick={onPrevious}
+          >
+            <ChevronLeft className="h-4 w-4" />
+          </button>
+          <div className="text-center">
+            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Viewing month</p>
+            <p className="mt-1 text-xl font-semibold">{format(calendarMonth, "MMMM yyyy")}</p>
+          </div>
+          <button
+            className="rounded-2xl border border-white/10 bg-slate-900/70 p-3 transition hover:bg-white/10"
+            onClick={onNext}
+          >
+            <ChevronRight className="h-4 w-4" />
+          </button>
         </div>
-        <button
-          className="rounded-2xl border border-white/10 bg-slate-900/70 p-3 transition hover:bg-white/10"
-          onClick={onNext}
-        >
-          <ChevronRight className="h-4 w-4" />
-        </button>
-        <div className="inline-flex rounded-2xl border border-white/10 bg-slate-900/70 p-1">
+        <div className="flex flex-wrap items-center gap-3">
           <button
-            className={cn(
-              "rounded-xl px-4 py-2 text-sm font-medium transition",
-              mode === "month" ? "bg-emerald-400 text-slate-950" : "text-slate-300 hover:bg-white/5",
-            )}
-            onClick={() => onModeChange("month")}
+            className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300"
+            onClick={onAddCustomEvent}
           >
-            Month
+            <Plus className="h-4 w-4" />
+            Add event
           </button>
-          <button
-            className={cn(
-              "rounded-xl px-4 py-2 text-sm font-medium transition",
-              mode === "agenda" ? "bg-emerald-400 text-slate-950" : "text-slate-300 hover:bg-white/5",
-            )}
-            onClick={() => onModeChange("agenda")}
-          >
-            Agenda
-          </button>
+          <div className="inline-flex rounded-2xl border border-white/10 bg-slate-900/70 p-1">
+            <button
+              className={cn(
+                "rounded-xl px-4 py-2 text-sm font-medium transition",
+                mode === "month" ? "bg-emerald-400 text-slate-950" : "text-slate-300 hover:bg-white/5",
+              )}
+              onClick={() => onModeChange("month")}
+            >
+              Month
+            </button>
+            <button
+              className={cn(
+                "rounded-xl px-4 py-2 text-sm font-medium transition",
+                mode === "agenda" ? "bg-emerald-400 text-slate-950" : "text-slate-300 hover:bg-white/5",
+              )}
+              onClick={() => onModeChange("agenda")}
+            >
+              Agenda
+            </button>
+          </div>
         </div>
       </div>
 
@@ -3475,6 +3762,7 @@ function CalendarView({
           ["arrival", "Arrival"],
           ["drop", "Target drop"],
           ["drop-day", "Drop day"],
+          ["custom", "Custom event"],
         ].map(([type, label]) => (
           <div
             key={type}

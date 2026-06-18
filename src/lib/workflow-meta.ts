@@ -1,6 +1,12 @@
 "use client";
 
-import type { ActivityEntry, DropDay, Product, ProductPriority } from "@/lib/types";
+import type {
+  ActivityEntry,
+  CalendarNoteEvent,
+  DropDay,
+  Product,
+  ProductPriority,
+} from "@/lib/types";
 
 const META_PREFIX = "\n\n<!--ORDER_BUDDY_META:";
 const META_SUFFIX = "-->";
@@ -15,7 +21,22 @@ type ProductMeta = {
 
 type DropMeta = {
   archived?: boolean;
+  customEvents?: CalendarNoteEvent[];
 };
+
+function isCalendarNoteEvent(value: unknown): value is CalendarNoteEvent {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const event = value as Record<string, unknown>;
+  return (
+    typeof event.id === "string" &&
+    typeof event.title === "string" &&
+    typeof event.notes === "string" &&
+    typeof event.date === "string"
+  );
+}
 
 function splitMetaValue(value: string | null | undefined) {
   const source = value ?? "";
@@ -81,7 +102,7 @@ export function serializeProductNotes(product: Pick<
 
 export function parseDropDescription(value: string | null | undefined): Pick<
   DropDay,
-  "description" | "archived"
+  "description" | "archived" | "customEvents"
 > {
   const { content, meta } = splitMetaValue(value);
   const dropMeta = (meta as DropMeta | null) ?? {};
@@ -89,11 +110,17 @@ export function parseDropDescription(value: string | null | undefined): Pick<
   return {
     description: content,
     archived: Boolean(dropMeta.archived),
+    customEvents: Array.isArray(dropMeta.customEvents)
+      ? dropMeta.customEvents.filter(isCalendarNoteEvent)
+      : [],
   };
 }
 
-export function serializeDropDescription(dropDay: Pick<DropDay, "description" | "archived">) {
+export function serializeDropDescription(
+  dropDay: Pick<DropDay, "description" | "archived" | "customEvents">,
+) {
   return packMetaValue(dropDay.description, {
     archived: dropDay.archived,
+    customEvents: dropDay.customEvents,
   });
 }
