@@ -9,8 +9,10 @@ import {
   format,
   isSameMonth,
   isToday,
+  parseISO,
   startOfMonth,
   startOfWeek,
+  subBusinessDays,
   subMonths,
 } from "date-fns";
 import {
@@ -51,6 +53,7 @@ import {
   productImagesBucket,
 } from "@/lib/supabase";
 import type {
+  ActivityEntry,
   AppData,
   AuthMode,
   CostEntry,
@@ -58,16 +61,72 @@ import type {
   DropDay,
   DropDayDraft,
   Product,
+  ProductPriority,
   ProductDraft,
   ProductStatus,
   ProductWithCosts,
 } from "@/lib/types";
 import { costTypes, productStatuses } from "@/lib/types";
+import {
+  parseDropDescription,
+  parseProductNotes,
+  serializeDropDescription,
+  serializeProductNotes,
+} from "@/lib/workflow-meta";
 import { cn, createId } from "@/lib/utils";
 
 type View = "dashboard" | "products" | "calendar" | "drops";
 type Scope = "all" | string;
 type ProductLayout = "board" | "list";
+type ProductSort = "next-action" | "name" | "cost-high" | "newest";
+type ProductStatusFilter = "all" | ProductStatus;
+type CalendarItemType = "sample" | "drop" | "bulk" | "arrival" | "drop-day";
+type CalendarItemKind = "sample-arrival" | "launch" | "bulk-ready" | "arrival" | "drop-day";
+type CalendarItem = {
+  id: string;
+  date: string;
+  label: string;
+  type: CalendarItemType;
+  kind: CalendarItemKind;
+  productId: string | null;
+  draggable: boolean;
+};
+type DrawerTab = "overview" | "timeline" | "costs" | "activity";
+type SavedFilter = {
+  id: string;
+  name: string;
+  search: string;
+  status: ProductStatusFilter;
+  category: string;
+  sort: ProductSort;
+};
+type CostEditorState = {
+  id: string | null;
+  draft: CostEntryDraft;
+};
+type ProductQuickFilter =
+  | "all"
+  | "bulk-ready-week"
+  | "arrivals-week"
+  | "missing-dates"
+  | "no-costs"
+  | "sample-review"
+  | "drop-risk";
+type PlanningAgendaItem = {
+  id: string;
+  productId: string;
+  title: string;
+  detail: string;
+  date: string;
+  status: "late" | "soon" | "planned";
+};
+type UpcomingMilestoneItem = {
+  id: string;
+  productId: string;
+  label: string;
+  date: string;
+  type: "bulk-ready" | "arrival";
+};
 
 type DropDayRow = {
   id: string;
@@ -109,6 +168,16 @@ type CostEntryRow = {
   created_at: string;
 };
 
+const productPriorityOptions: { value: ProductPriority; label: string }[] = [
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "urgent", label: "Urgent" },
+];
+
+const SAVED_FILTERS_KEY = "order-buddy-saved-filters";
+const SAMPLE_REVIEW_BUFFER_DAYS = 3;
+
 const navItems: { id: View; label: string; icon: typeof Layers3 }[] = [
   { id: "dashboard", label: "Dashboard", icon: Layers3 },
   { id: "products", label: "All Products", icon: Package2 },
@@ -132,6 +201,11 @@ const emptyProductDraft: ProductDraft = {
   productionDays: 0,
   shippingDays: 0,
   targetLaunchDate: null,
+  nextAction: "",
+  owner: "",
+  priority: "medium",
+  dueDate: null,
+  activity: [],
 };
 
 const emptyDropDayDraft: DropDayDraft = {
@@ -149,16 +223,19 @@ const emptyCostDraft: CostEntryDraft = {
 };
 
 function mapDropDayRow(row: DropDayRow): DropDay {
+  const dropMeta = parseDropDescription(row.description);
   return {
     id: row.id,
     name: row.name,
     targetDate: row.target_date,
-    description: row.description ?? "",
+    description: dropMeta.description,
+    archived: dropMeta.archived,
     createdAt: row.created_at,
   };
 }
 
 function mapProductRow(row: ProductRow): Product {
+  const workflowMeta = parseProductNotes(row.notes);
   return {
     id: row.id,
     name: row.name,
@@ -168,7 +245,7 @@ function mapProductRow(row: ProductRow): Product {
     imagePath: row.image_path,
     status: row.status,
     dropDayId: row.drop_day_id,
-    notes: row.notes ?? "",
+    notes: workflowMeta.notes,
     sampleOrderedAt: row.sample_ordered_at,
     sampleProductionDays: row.sample_production_days ?? 0,
     sampleShippingDays: row.sample_shipping_days ?? 0,
@@ -176,6 +253,11 @@ function mapProductRow(row: ProductRow): Product {
     productionDays: row.production_days ?? 0,
     shippingDays: row.shipping_days ?? 0,
     targetLaunchDate: row.target_launch_date,
+    nextAction: workflowMeta.nextAction,
+    owner: workflowMeta.owner,
+    priority: workflowMeta.priority,
+    dueDate: workflowMeta.dueDate,
+    activity: workflowMeta.activity,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -203,7 +285,7 @@ function toProductRow(product: Product) {
     image_path: product.imagePath,
     status: product.status,
     drop_day_id: product.dropDayId,
-    notes: product.notes,
+    notes: serializeProductNotes(product),
     sample_ordered_at: product.sampleOrderedAt,
     sample_production_days: product.sampleProductionDays,
     sample_shipping_days: product.sampleShippingDays,
@@ -223,13 +305,22 @@ function getScopeLabel(scope: Scope, dropDays: DropDay[]) {
   return dropDays.find((drop) => drop.id === scope)?.name ?? "Selected drop";
 }
 
-function getProductPrimaryMilestone(product: Product) {
+function getAssignedDropDate(dropDays: DropDay[], dropDayId: string | null) {
+  if (!dropDayId) {
+    return null;
+  }
+
+  return dropDays.find((drop) => drop.id === dropDayId)?.targetDate ?? null;
+}
+
+function getProductPrimaryMilestone(product: Product, dropDays: DropDay[]) {
   const timeline = getProductTimeline(product);
+  const assignedDropDate = getAssignedDropDate(dropDays, product.dropDayId);
 
   if (product.status === "idea") {
     return {
       label: "Target drop",
-      date: product.targetLaunchDate,
+      date: assignedDropDate,
     };
   }
 
@@ -256,6 +347,127 @@ function getProductPrimaryMilestone(product: Product) {
     label: "Last update",
     date: product.updatedAt.slice(0, 10),
   };
+}
+
+function getProductNextAction(product: Product) {
+  if (product.nextAction.trim()) {
+    return product.nextAction.trim();
+  }
+
+  const timeline = getProductTimeline(product);
+
+  if (product.status === "idea") {
+    return "Order first sample";
+  }
+
+  if (product.status === "sample") {
+    if (!product.sampleOrderedAt) {
+      return "Add sample order date";
+    }
+
+    if (!timeline.sampleArrivalDate) {
+      return "Add sample timing";
+    }
+
+    return "Review sample";
+  }
+
+  if (product.status === "bulk") {
+    if (!product.bulkStartDate) {
+      return "Set bulk start";
+    }
+
+    if (!timeline.arrivalDate) {
+      return "Add shipping timing";
+    }
+
+    return "Track delivery";
+  }
+
+  return "No action";
+}
+
+function getPriorityBadgeClasses(priority: ProductPriority) {
+  switch (priority) {
+    case "urgent":
+      return "border-rose-400/30 bg-rose-400/10 text-rose-100";
+    case "high":
+      return "border-amber-400/30 bg-amber-400/10 text-amber-100";
+    case "medium":
+      return "border-sky-400/30 bg-sky-400/10 text-sky-100";
+    case "low":
+    default:
+      return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
+  }
+}
+
+function getUrgencyTone(product: Product, dropDays: DropDay[]) {
+  const referenceDate = product.dueDate ?? getProductSortDate(product, dropDays);
+  const days = daysUntil(referenceDate);
+
+  if (days === null) {
+    return "border-white/5";
+  }
+
+  if (days < 0) {
+    return "border-l-2 border-l-rose-400/80 bg-rose-400/[0.04]";
+  }
+
+  if (days <= 5) {
+    return "border-l-2 border-l-amber-400/80 bg-amber-400/[0.04]";
+  }
+
+  return "border-l-2 border-l-cyan-400/60";
+}
+
+function buildActivityEntry(message: string, user: string): ActivityEntry {
+  return {
+    id: createId(),
+    message,
+    user,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function appendActivity(product: Product, message: string, user: string) {
+  return [buildActivityEntry(message, user), ...product.activity].slice(0, 25);
+}
+
+function getProductSortDate(product: Product, dropDays: DropDay[]) {
+  const primaryMilestone = getProductPrimaryMilestone(product, dropDays);
+  return primaryMilestone.date ?? product.updatedAt.slice(0, 10);
+}
+
+function getStatusBadgeClasses(status: ProductStatus) {
+  switch (status) {
+    case "idea":
+      return "border-violet-400/30 bg-violet-400/10 text-violet-100";
+    case "sample":
+      return "border-cyan-400/30 bg-cyan-400/10 text-cyan-100";
+    case "bulk":
+      return "border-amber-400/30 bg-amber-400/10 text-amber-100";
+    case "canceled":
+      return "border-rose-400/30 bg-rose-400/10 text-rose-100";
+    default:
+      return "border-white/10 bg-white/5 text-slate-200";
+  }
+}
+
+function getCalendarEventClasses(type: CalendarItemType) {
+  switch (type) {
+    case "sample":
+      return "border-cyan-400/35 bg-cyan-400/20 text-cyan-50";
+    case "drop":
+      return "border-fuchsia-400/40 bg-fuchsia-400/20 text-fuchsia-50";
+    case "bulk":
+      return "border-amber-400/40 bg-amber-400/20 text-amber-50";
+    case "arrival":
+      return "border-sky-400/40 bg-sky-400/20 text-sky-50";
+    case "drop-day":
+      return "border-emerald-400/40 bg-emerald-400/20 text-emerald-50";
+    default:
+      return "border-white/10 bg-white/5 text-slate-100";
+  }
 }
 
 function readFileAsDataUrl(file: File) {
@@ -293,7 +505,7 @@ export function PipelineApp() {
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
 
   const [view, setView] = useState<View>("dashboard");
-  const [productLayout, setProductLayout] = useState<ProductLayout>("board");
+  const [productLayout, setProductLayout] = useState<ProductLayout>("list");
   const [scope, setScope] = useState<Scope>("all");
   const [data, setData] = useState<AppData>(createEmptyAppData());
   const [productDraft, setProductDraft] = useState<ProductDraft>(emptyProductDraft);
@@ -310,6 +522,34 @@ export function PipelineApp() {
   const [activeUserEmail, setActiveUserEmail] = useState<string>("Demo mode");
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
+  const [showProductDrawer, setShowProductDrawer] = useState(false);
+  const [showAddProductModal, setShowAddProductModal] = useState(false);
+  const [showAddDropModal, setShowAddDropModal] = useState(false);
+  const [productSearch, setProductSearch] = useState("");
+  const [productStatusFilter, setProductStatusFilter] =
+    useState<ProductStatusFilter>("all");
+  const [productCategoryFilter, setProductCategoryFilter] = useState("all");
+  const [productSort, setProductSort] = useState<ProductSort>("next-action");
+  const [savedFilters, setSavedFilters] = useState<SavedFilter[]>(() => {
+    if (typeof window === "undefined") {
+      return [];
+    }
+
+    try {
+      const raw = window.localStorage.getItem(SAVED_FILTERS_KEY);
+      return raw ? (JSON.parse(raw) as SavedFilter[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [drawerTab, setDrawerTab] = useState<DrawerTab>("overview");
+  const [costEditor, setCostEditor] = useState<CostEditorState>({
+    id: null,
+    draft: emptyCostDraft,
+  });
+  const [calendarViewMode, setCalendarViewMode] = useState<"month" | "agenda">("month");
+  const [showArchivedDrops, setShowArchivedDrops] = useState(false);
+  const [productQuickFilter, setProductQuickFilter] = useState<ProductQuickFilter>("all");
 
   const productsWithCosts = useMemo(
     () => attachCosts(data.products, data.costEntries),
@@ -324,44 +564,374 @@ export function PipelineApp() {
     return productsWithCosts.filter((product) => product.dropDayId === scope);
   }, [productsWithCosts, scope]);
 
+  const visibleDropDays = useMemo(
+    () => data.dropDays.filter((dropDay) => (showArchivedDrops ? true : !dropDay.archived)),
+    [data.dropDays, showArchivedDrops],
+  );
+
+  const productCategories = useMemo(() => {
+    return Array.from(
+      new Set(
+        productsWithCosts
+          .map((product) => product.category)
+          .filter((category) => category.trim().length > 0),
+      ),
+    ).sort((left, right) => left.localeCompare(right));
+  }, [productsWithCosts]);
+
+  const visibleProducts = useMemo(() => {
+    const normalizedSearch = productSearch.trim().toLowerCase();
+
+    const nextProducts = filteredProducts
+      .filter((product) => {
+        switch (productQuickFilter) {
+          case "bulk-ready-week": {
+            const bulkReadyDate = getProductTimeline(product).bulkReadyDate;
+            const days = daysUntil(bulkReadyDate);
+            return days !== null && days >= 0 && days <= 7;
+          }
+          case "arrivals-week": {
+            const arrivalDate = getProductTimeline(product).arrivalDate;
+            const days = daysUntil(arrivalDate);
+            return days !== null && days >= 0 && days <= 7;
+          }
+          case "missing-dates":
+            return product.status === "sample"
+              ? !product.sampleOrderedAt ||
+                  !calculateSampleArrivalDate(
+                    product.sampleOrderedAt,
+                    product.sampleProductionDays,
+                    product.sampleShippingDays,
+                  )
+              : product.status === "bulk"
+                ? !product.bulkStartDate ||
+                  !calculateArrivalDate(
+                    product.bulkStartDate,
+                    product.productionDays,
+                    product.shippingDays,
+                  )
+                : false;
+          case "no-costs":
+            return product.costs.length === 0;
+          case "sample-review":
+            return product.status === "sample";
+          case "drop-risk": {
+            const timeline = getProductTimeline(product);
+            const finalDate =
+              timeline.arrivalDate ?? timeline.bulkReadyDate ?? timeline.sampleArrivalDate;
+            const targetDate = getAssignedDropDate(data.dropDays, product.dropDayId);
+            return Boolean(finalDate && targetDate && finalDate > targetDate);
+          }
+          case "all":
+          default:
+            return true;
+        }
+      })
+      .filter((product) =>
+        productStatusFilter === "all" ? true : product.status === productStatusFilter,
+      )
+      .filter((product) =>
+        productCategoryFilter === "all" ? true : product.category === productCategoryFilter,
+      )
+      .filter((product) => {
+        if (!normalizedSearch) {
+          return true;
+        }
+
+        const searchText = [
+          product.name,
+          product.sku,
+          product.category,
+          product.supplier,
+          getDropDayName(data.dropDays, product.dropDayId),
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        return searchText.includes(normalizedSearch);
+      });
+
+    return [...nextProducts].sort((left, right) => {
+      switch (productSort) {
+        case "name":
+          return left.name.localeCompare(right.name);
+        case "cost-high":
+          return getProductTotalCost(right) - getProductTotalCost(left);
+        case "newest":
+          return right.createdAt.localeCompare(left.createdAt);
+        case "next-action":
+        default:
+          return getProductSortDate(left, data.dropDays).localeCompare(
+            getProductSortDate(right, data.dropDays),
+          );
+      }
+    });
+  }, [
+    data.dropDays,
+    filteredProducts,
+    productCategoryFilter,
+    productQuickFilter,
+    productSearch,
+    productSort,
+    productStatusFilter,
+  ]);
+
+  const actionCenterItems = useMemo(() => {
+    const bulkReadyWeek = filteredProducts.filter((product) => {
+      const bulkReadyDate = getProductTimeline(product).bulkReadyDate;
+      const countdown = daysUntil(bulkReadyDate);
+      return countdown !== null && countdown >= 0 && countdown <= 7;
+    });
+
+    const arrivalsWeek = filteredProducts.filter((product) => {
+      const arrivalDate = getProductTimeline(product).arrivalDate;
+      const countdown = daysUntil(arrivalDate);
+      return countdown !== null && countdown >= 0 && countdown <= 7;
+    });
+
+    const missingDates = filteredProducts.filter((product) => {
+      if (product.status === "sample") {
+        return !product.sampleOrderedAt || !calculateSampleArrivalDate(
+          product.sampleOrderedAt,
+          product.sampleProductionDays,
+          product.sampleShippingDays,
+        );
+      }
+
+      if (product.status === "bulk") {
+        return !product.bulkStartDate || !calculateArrivalDate(
+          product.bulkStartDate,
+          product.productionDays,
+          product.shippingDays,
+        );
+      }
+
+      return false;
+    });
+
+    const noCosts = filteredProducts.filter((product) => product.costs.length === 0);
+    const needsReview = filteredProducts.filter((product) => product.status === "sample");
+    const dropAtRisk = filteredProducts.filter((product) => {
+      const timeline = getProductTimeline(product);
+      const finalDate =
+        timeline.arrivalDate ?? timeline.bulkReadyDate ?? timeline.sampleArrivalDate;
+      const targetDate = getAssignedDropDate(data.dropDays, product.dropDayId);
+      if (!finalDate || !targetDate) {
+        return false;
+      }
+      return finalDate > targetDate;
+    });
+
+    return [
+      {
+        id: "bulk-ready-week",
+        label: "Bulk ready this week",
+        count: bulkReadyWeek.length,
+        description: "Bulk runs completing in the next 7 days.",
+        accent: "text-amber-100",
+        tone: "border-amber-400/20 bg-amber-400/10",
+        filter: "bulk-ready-week" as const,
+      },
+      {
+        id: "arrivals-week",
+        label: "Arrivals this week",
+        count: arrivalsWeek.length,
+        description: "Products expected to arrive in the next 7 days.",
+        accent: "text-sky-100",
+        tone: "border-sky-400/20 bg-sky-400/10",
+        filter: "arrivals-week" as const,
+      },
+      {
+        id: "missing-dates",
+        label: "Missing dates",
+        count: missingDates.length,
+        description: "Items missing the dates needed to forecast timeline.",
+        accent: "text-sky-100",
+        tone: "border-sky-400/20 bg-sky-400/10",
+        filter: "missing-dates" as const,
+      },
+      {
+        id: "no-costs",
+        label: "No costs entered",
+        count: noCosts.length,
+        description: "Products without any expense tracking yet.",
+        accent: "text-emerald-100",
+        tone: "border-emerald-400/20 bg-emerald-400/10",
+        filter: "no-costs" as const,
+      },
+      {
+        id: "sample-review",
+        label: "Needs sample review",
+        count: needsReview.length,
+        description: "Samples that still need approval or feedback.",
+        accent: "text-cyan-100",
+        tone: "border-cyan-400/20 bg-cyan-400/10",
+        filter: "sample-review" as const,
+      },
+      {
+        id: "drop-risk",
+        label: "Drop at risk",
+        count: dropAtRisk.length,
+        description: "Products forecasted after their target drop date.",
+        accent: "text-fuchsia-100",
+        tone: "border-fuchsia-400/20 bg-fuchsia-400/10",
+        filter: "drop-risk" as const,
+      },
+    ];
+  }, [data.dropDays, filteredProducts]);
+
+  const upcomingMilestones = useMemo(() => {
+    const items: UpcomingMilestoneItem[] = [];
+
+    for (const product of filteredProducts) {
+      const timeline = getProductTimeline(product);
+
+      if (timeline.bulkReadyDate) {
+        items.push({
+          id: `${product.id}-bulk-ready`,
+          productId: product.id,
+          label: `${product.name} bulk ready`,
+          date: timeline.bulkReadyDate,
+          type: "bulk-ready",
+        });
+      }
+
+      if (timeline.arrivalDate) {
+        items.push({
+          id: `${product.id}-arrival`,
+          productId: product.id,
+          label: `${product.name} arrival`,
+          date: timeline.arrivalDate,
+          type: "arrival",
+        });
+      }
+    }
+
+    return items.sort((left, right) => left.date.localeCompare(right.date)).slice(0, 8);
+  }, [filteredProducts]);
+
+  const dashboardAgenda = useMemo(() => {
+    return filteredProducts
+      .flatMap((product) => {
+        const dropDate = getAssignedDropDate(data.dropDays, product.dropDayId);
+        if (!dropDate || product.status === "canceled") {
+          return [];
+        }
+
+        const items: PlanningAgendaItem[] = [];
+        const bulkStartBy =
+          product.productionDays > 0 || product.shippingDays > 0
+            ? format(
+                subBusinessDays(
+                  parseISO(dropDate),
+                  Math.max(product.productionDays, 0) + Math.max(product.shippingDays, 0),
+                ),
+                "yyyy-MM-dd",
+              )
+            : null;
+
+        const sampleApproveBy = bulkStartBy
+          ? format(
+              subBusinessDays(parseISO(bulkStartBy), SAMPLE_REVIEW_BUFFER_DAYS),
+              "yyyy-MM-dd",
+            )
+          : null;
+
+        const sampleOrderBy =
+          sampleApproveBy && (product.sampleProductionDays > 0 || product.sampleShippingDays > 0)
+            ? format(
+                subBusinessDays(
+                  parseISO(sampleApproveBy),
+                  Math.max(product.sampleProductionDays, 0) +
+                    Math.max(product.sampleShippingDays, 0),
+                ),
+                "yyyy-MM-dd",
+              )
+            : null;
+
+        if (
+          (product.status === "idea" || product.status === "sample") &&
+          !product.sampleOrderedAt &&
+          sampleOrderBy
+        ) {
+          items.push({
+            id: `${product.id}-sample-order-by`,
+            productId: product.id,
+            title: `Order sample by ${formatDate(sampleOrderBy)}`,
+            detail: `${product.name} should enter sampling in time for ${getDropDayName(data.dropDays, product.dropDayId)}.`,
+            date: sampleOrderBy,
+            status:
+              (daysUntil(sampleOrderBy) ?? 99) < 0
+                ? "late"
+                : (daysUntil(sampleOrderBy) ?? 99) <= 7
+                  ? "soon"
+                  : "planned",
+          });
+        }
+
+        if (
+          product.status === "sample" &&
+          product.sampleOrderedAt &&
+          !product.bulkStartDate &&
+          sampleApproveBy
+        ) {
+          items.push({
+            id: `${product.id}-sample-approve-by`,
+            productId: product.id,
+            title: `Approve sample by ${formatDate(sampleApproveBy)}`,
+            detail: `${product.name} needs approval so bulk can start by ${formatDate(bulkStartBy)}.`,
+            date: sampleApproveBy,
+            status:
+              (daysUntil(sampleApproveBy) ?? 99) < 0
+                ? "late"
+                : (daysUntil(sampleApproveBy) ?? 99) <= 7
+                  ? "soon"
+                  : "planned",
+          });
+        }
+
+        if (product.status === "bulk" && !product.bulkStartDate && bulkStartBy) {
+          items.push({
+            id: `${product.id}-bulk-start-by`,
+            productId: product.id,
+            title: `Bulk should start by ${formatDate(bulkStartBy)}`,
+            detail: `${product.name} needs bulk started in time to hit ${formatDate(dropDate)}.`,
+            date: bulkStartBy,
+            status:
+              (daysUntil(bulkStartBy) ?? 99) < 0
+                ? "late"
+                : (daysUntil(bulkStartBy) ?? 99) <= 7
+                  ? "soon"
+                  : "planned",
+          });
+        }
+
+        return items;
+      })
+      .sort((left, right) => left.date.localeCompare(right.date))
+      .slice(0, 10);
+  }, [data.dropDays, filteredProducts]);
+
   const selectedProduct = useMemo(
     () =>
       productsWithCosts.find((product) => product.id === selectedProductId) ??
-      filteredProducts[0] ??
+      visibleProducts[0] ??
       null,
-    [filteredProducts, productsWithCosts, selectedProductId],
+    [productsWithCosts, selectedProductId, visibleProducts],
   );
-
-  const upcomingBulkReady = useMemo(() => {
-    return filteredProducts
-      .map((product) => ({
-        product,
-        bulkReadyDate: getProductTimeline(product).bulkReadyDate,
-      }))
-      .filter((item) => item.bulkReadyDate)
-      .sort((left, right) =>
-        (left.bulkReadyDate ?? "").localeCompare(right.bulkReadyDate ?? ""),
-      )
-      .slice(0, 4);
-  }, [filteredProducts]);
-
-  const upcomingArrivals = useMemo(() => {
-    return filteredProducts
-      .map((product) => ({
-        product,
-        arrivalDate: getProductTimeline(product).arrivalDate,
-      }))
-      .filter((item) => item.arrivalDate)
-      .sort((left, right) =>
-        (left.arrivalDate ?? "").localeCompare(right.arrivalDate ?? ""),
-      )
-      .slice(0, 4);
-  }, [filteredProducts]);
 
   useEffect(() => {
     void initializeApp();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(SAVED_FILTERS_KEY, JSON.stringify(savedFilters));
+  }, [savedFilters]);
 
   function syncSelection(nextData: AppData, preferredProductId?: string | null) {
     const nextSelectedProduct =
@@ -371,6 +941,93 @@ export function PipelineApp() {
 
     setSelectedProductId(nextSelectedProduct?.id ?? null);
     setProductEditor(nextSelectedProduct);
+  }
+
+  function openProduct(product: ProductWithCosts) {
+    setSelectedProductId(product.id);
+    setProductEditor(product);
+    setShowProductDrawer(true);
+    setDrawerTab("overview");
+    cancelEditingCost();
+  }
+
+  function resetProductFilters() {
+    setProductSearch("");
+    setProductStatusFilter("all");
+    setProductCategoryFilter("all");
+    setProductSort("next-action");
+    setProductQuickFilter("all");
+  }
+
+  function saveCurrentFilter() {
+    const name = window.prompt("Name this filter view");
+    if (!name?.trim()) {
+      return;
+    }
+
+    const nextFilter: SavedFilter = {
+      id: createId(),
+      name: name.trim(),
+      search: productSearch,
+      status: productStatusFilter,
+      category: productCategoryFilter,
+      sort: productSort,
+    };
+
+    setSavedFilters((current) => [nextFilter, ...current.filter((item) => item.name !== nextFilter.name)].slice(0, 8));
+    setMessage(`Saved filter "${nextFilter.name}".`);
+  }
+
+  function applySavedFilter(filter: SavedFilter) {
+    setProductSearch(filter.search);
+    setProductStatusFilter(filter.status);
+    setProductCategoryFilter(filter.category);
+    setProductSort(filter.sort);
+    setProductQuickFilter("all");
+  }
+
+  function openActionFilter(filter: ProductQuickFilter) {
+    setProductQuickFilter(filter);
+    setView("products");
+    setProductLayout("list");
+  }
+
+  async function toggleDropArchive(dropDayId: string, archived: boolean) {
+    const dropDay = data.dropDays.find((item) => item.id === dropDayId);
+    if (!dropDay) {
+      return;
+    }
+
+    const nextDropDay = { ...dropDay, archived };
+
+    if (authMode === "demo") {
+      await persistData(
+        {
+          ...data,
+          dropDays: data.dropDays.map((item) => (item.id === dropDayId ? nextDropDay : item)),
+        },
+        selectedProductId,
+      );
+      setMessage(archived ? "Drop archived." : "Drop restored.");
+      return;
+    }
+
+    if (!supabase) {
+      return;
+    }
+
+    const { error: updateError } = await supabase
+      .from("drop_days")
+      .update({ description: serializeDropDescription(nextDropDay) })
+      .eq("id", dropDayId);
+
+    if (updateError) {
+      setError(updateError.message);
+      return;
+    }
+
+    await refreshSupabaseData();
+    setMessage(archived ? "Drop archived." : "Drop restored.");
   }
 
   async function initializeApp() {
@@ -509,6 +1166,7 @@ export function PipelineApp() {
       name: dropDraft.name,
       targetDate: dropDraft.targetDate,
       description: dropDraft.description,
+      archived: false,
       createdAt: new Date().toISOString(),
     };
 
@@ -523,6 +1181,7 @@ export function PipelineApp() {
         selectedProductId,
       );
       setDropDraft(emptyDropDayDraft);
+      setShowAddDropModal(false);
       setSaving(false);
       setMessage("Drop day added.");
       return;
@@ -537,7 +1196,7 @@ export function PipelineApp() {
       id: newDropDay.id,
       name: newDropDay.name,
       target_date: newDropDay.targetDate,
-      description: newDropDay.description,
+      description: serializeDropDescription(newDropDay),
     });
 
     if (insertError) {
@@ -548,6 +1207,7 @@ export function PipelineApp() {
 
     await refreshSupabaseData();
     setDropDraft(emptyDropDayDraft);
+    setShowAddDropModal(false);
     setSaving(false);
     setMessage("Drop day added.");
   }
@@ -564,6 +1224,8 @@ export function PipelineApp() {
     const newProduct: Product = {
       id: createId(),
       ...productDraft,
+      targetLaunchDate: getAssignedDropDate(data.dropDays, productDraft.dropDayId),
+      activity: [buildActivityEntry("Product created", activeUserEmail)],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -575,6 +1237,8 @@ export function PipelineApp() {
       };
       await persistData(nextData, newProduct.id);
       setProductDraft(emptyProductDraft);
+      setShowAddProductModal(false);
+      setShowProductDrawer(true);
       setSaving(false);
       setMessage("Product added.");
       return;
@@ -600,6 +1264,8 @@ export function PipelineApp() {
     await refreshSupabaseData();
     setSelectedProductId(newProduct.id);
     setProductDraft(emptyProductDraft);
+    setShowAddProductModal(false);
+    setShowProductDrawer(true);
     setSaving(false);
     setMessage("Product added.");
   }
@@ -645,6 +1311,8 @@ export function PipelineApp() {
     setMessage("");
     const updatedProduct = {
       ...productEditor,
+      targetLaunchDate: getAssignedDropDate(data.dropDays, productEditor.dropDayId),
+      activity: appendActivity(productEditor, "Product details updated", activeUserEmail),
       updatedAt: new Date().toISOString(),
     };
 
@@ -795,6 +1463,11 @@ export function PipelineApp() {
     const nextProduct = {
       ...product,
       status,
+      activity: appendActivity(
+        product,
+        `Status changed to ${getStatusLabel(status)}`,
+        activeUserEmail,
+      ),
       updatedAt: new Date().toISOString(),
     };
 
@@ -826,6 +1499,84 @@ export function PipelineApp() {
     await refreshSupabaseData();
   }
 
+  async function handleCalendarEventOpen(item: CalendarItem) {
+    if (!item.productId) {
+      if (item.kind === "drop-day") {
+        const dropDayId = item.id.replace(/-drop-day$/, "");
+        setScope(dropDayId);
+        setView("products");
+      }
+      return;
+    }
+
+    const product = productsWithCosts.find((entry) => entry.id === item.productId);
+    if (!product) {
+      return;
+    }
+
+    openProduct(product);
+  }
+
+  async function handleCalendarEventDrop(item: CalendarItem, targetDate: string) {
+    if (!item.productId || !item.draggable) {
+      return;
+    }
+
+    const product = data.products.find((entry) => entry.id === item.productId);
+    if (!product) {
+      return;
+    }
+
+    const totalBusinessDays =
+      item.kind === "sample-arrival"
+        ? product.sampleProductionDays + product.sampleShippingDays
+        : item.kind === "bulk-ready"
+          ? product.productionDays
+          : item.kind === "arrival"
+            ? product.productionDays + product.shippingDays
+            : 0;
+
+    const shiftedDate =
+      totalBusinessDays > 0
+        ? format(subBusinessDays(parseISO(targetDate), totalBusinessDays), "yyyy-MM-dd")
+        : targetDate;
+
+    const updatedProduct: Product = {
+      ...product,
+      targetLaunchDate: getAssignedDropDate(data.dropDays, product.dropDayId),
+      sampleOrderedAt:
+        item.kind === "sample-arrival" ? shiftedDate : product.sampleOrderedAt,
+      bulkStartDate:
+        item.kind === "bulk-ready" || item.kind === "arrival"
+          ? shiftedDate
+          : product.bulkStartDate,
+      activity: appendActivity(
+        product,
+        `${item.label} moved to ${formatDate(targetDate)}`,
+        activeUserEmail,
+      ),
+      updatedAt: new Date().toISOString(),
+    };
+
+    setSaving(true);
+    setError("");
+    setMessage("");
+
+    const saveError = await saveProductRecord(updatedProduct);
+    if (saveError) {
+      setError(saveError);
+      setSaving(false);
+      return;
+    }
+
+    if (selectedProductId === updatedProduct.id) {
+      setProductEditor(updatedProduct);
+    }
+
+    setSaving(false);
+    setMessage(`${product.name} moved to ${formatDate(targetDate)}.`);
+  }
+
   async function handleAddCostEntry() {
     if (!selectedProductId) {
       setError("Pick a product before adding a cost entry.");
@@ -852,9 +1603,23 @@ export function PipelineApp() {
     };
 
     if (authMode === "demo") {
+      const selectedProductRecord = data.products.find((product) => product.id === selectedProductId);
       await persistData(
         {
           ...data,
+          products: data.products.map((product) =>
+            product.id === selectedProductId && selectedProductRecord
+              ? {
+                  ...selectedProductRecord,
+                  activity: appendActivity(
+                    selectedProductRecord,
+                    `Cost added: ${newEntry.title} (${currency(newEntry.amount)})`,
+                    activeUserEmail,
+                  ),
+                  updatedAt: new Date().toISOString(),
+                }
+              : product,
+          ),
           costEntries: [newEntry, ...data.costEntries],
         },
         selectedProductId,
@@ -887,10 +1652,203 @@ export function PipelineApp() {
       return;
     }
 
+    const selectedProductRecord = data.products.find((product) => product.id === selectedProductId);
+    if (selectedProductRecord) {
+      await saveProductRecord({
+        ...selectedProductRecord,
+        activity: appendActivity(
+          selectedProductRecord,
+          `Cost added: ${newEntry.title} (${currency(newEntry.amount)})`,
+          activeUserEmail,
+        ),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
     await refreshSupabaseData();
     setCostDraft(emptyCostDraft);
     setSaving(false);
     setMessage("Cost entry added.");
+  }
+
+  function startEditingCost(entry: CostEntry) {
+    setCostEditor({
+      id: entry.id,
+      draft: {
+        title: entry.title,
+        description: entry.description,
+        amount: entry.amount,
+        entryDate: entry.entryDate,
+        costType: entry.costType,
+      },
+    });
+    setDrawerTab("costs");
+  }
+
+  function cancelEditingCost() {
+    setCostEditor({
+      id: null,
+      draft: emptyCostDraft,
+    });
+  }
+
+  async function handleSaveEditedCost() {
+    if (!costEditor.id || !selectedProductId) {
+      return;
+    }
+
+    if (!costEditor.draft.title || costEditor.draft.amount <= 0) {
+      setError("Cost title and amount are required.");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+
+    const nextEntry: CostEntry = {
+      id: costEditor.id,
+      productId: selectedProductId,
+      title: costEditor.draft.title,
+      description: costEditor.draft.description,
+      amount: costEditor.draft.amount,
+      entryDate: costEditor.draft.entryDate,
+      costType: costEditor.draft.costType,
+      createdAt:
+        data.costEntries.find((entry) => entry.id === costEditor.id)?.createdAt ??
+        new Date().toISOString(),
+    };
+
+    if (authMode === "demo") {
+      const selectedProductRecord = data.products.find((product) => product.id === selectedProductId);
+      await persistData(
+        {
+          ...data,
+          products: data.products.map((product) =>
+            product.id === selectedProductId && selectedProductRecord
+              ? {
+                  ...selectedProductRecord,
+                  activity: appendActivity(
+                    selectedProductRecord,
+                    `Cost updated: ${nextEntry.title}`,
+                    activeUserEmail,
+                  ),
+                  updatedAt: new Date().toISOString(),
+                }
+              : product,
+          ),
+          costEntries: data.costEntries.map((entry) => (entry.id === nextEntry.id ? nextEntry : entry)),
+        },
+        selectedProductId,
+      );
+      cancelEditingCost();
+      setSaving(false);
+      setMessage("Cost entry updated.");
+      return;
+    }
+
+    if (!supabase) {
+      setSaving(false);
+      return;
+    }
+
+    const { error: updateError } = await supabase
+      .from("cost_entries")
+      .update({
+        title: nextEntry.title,
+        description: nextEntry.description,
+        amount: nextEntry.amount,
+        entry_date: nextEntry.entryDate,
+        cost_type: nextEntry.costType,
+      })
+      .eq("id", nextEntry.id);
+
+    if (updateError) {
+      setError(updateError.message);
+      setSaving(false);
+      return;
+    }
+
+    const selectedProductRecord = data.products.find((product) => product.id === selectedProductId);
+    if (selectedProductRecord) {
+      await saveProductRecord({
+        ...selectedProductRecord,
+        activity: appendActivity(selectedProductRecord, `Cost updated: ${nextEntry.title}`, activeUserEmail),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    cancelEditingCost();
+    setSaving(false);
+    setMessage("Cost entry updated.");
+  }
+
+  async function handleDeleteCostEntry(entryId: string) {
+    const entry = data.costEntries.find((item) => item.id === entryId);
+    if (!entry) {
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+
+    if (authMode === "demo") {
+      const selectedProductRecord = data.products.find((product) => product.id === entry.productId);
+      await persistData(
+        {
+          ...data,
+          products: data.products.map((product) =>
+            product.id === entry.productId && selectedProductRecord
+              ? {
+                  ...selectedProductRecord,
+                  activity: appendActivity(
+                    selectedProductRecord,
+                    `Cost deleted: ${entry.title}`,
+                    activeUserEmail,
+                  ),
+                  updatedAt: new Date().toISOString(),
+                }
+              : product,
+          ),
+          costEntries: data.costEntries.filter((item) => item.id !== entryId),
+        },
+        entry.productId,
+      );
+      if (costEditor.id === entryId) {
+        cancelEditingCost();
+      }
+      setSaving(false);
+      setMessage("Cost entry deleted.");
+      return;
+    }
+
+    if (!supabase) {
+      setSaving(false);
+      return;
+    }
+
+    const { error: deleteError } = await supabase.from("cost_entries").delete().eq("id", entryId);
+    if (deleteError) {
+      setError(deleteError.message);
+      setSaving(false);
+      return;
+    }
+
+    const selectedProductRecord = data.products.find((product) => product.id === entry.productId);
+    if (selectedProductRecord) {
+      await saveProductRecord({
+        ...selectedProductRecord,
+        activity: appendActivity(selectedProductRecord, `Cost deleted: ${entry.title}`, activeUserEmail),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    if (costEditor.id === entryId) {
+      cancelEditingCost();
+    }
+
+    await refreshSupabaseData();
+    setSaving(false);
+    setMessage("Cost entry deleted.");
   }
 
   const calendarItems = useMemo(() => {
@@ -904,14 +1862,9 @@ export function PipelineApp() {
               date: timeline.sampleArrivalDate,
               label: `${product.name} sample arrival`,
               type: "sample" as const,
-            }
-          : null,
-        product.targetLaunchDate
-          ? {
-              id: `${product.id}-launch`,
-              date: product.targetLaunchDate,
-              label: `${product.name} target drop`,
-              type: "drop" as const,
+              kind: "sample-arrival" as const,
+              productId: product.id,
+              draggable: true,
             }
           : null,
         timeline.bulkReadyDate
@@ -920,6 +1873,9 @@ export function PipelineApp() {
               date: timeline.bulkReadyDate,
               label: `${product.name} bulk ready`,
               type: "bulk" as const,
+              kind: "bulk-ready" as const,
+              productId: product.id,
+              draggable: true,
             }
           : null,
         timeline.arrivalDate
@@ -928,24 +1884,30 @@ export function PipelineApp() {
               date: timeline.arrivalDate,
               label: `${product.name} arrival`,
               type: "arrival" as const,
+              kind: "arrival" as const,
+              productId: product.id,
+              draggable: true,
             }
           : null,
       ].filter(Boolean);
     });
 
-    const dropItems = data.dropDays
+    const dropItems = visibleDropDays
       .filter((dropDay) => scope === "all" || dropDay.id === scope)
       .map((dropDay) => ({
         id: `${dropDay.id}-drop-day`,
         date: dropDay.targetDate,
         label: `${dropDay.name}`,
         type: "drop-day" as const,
+        kind: "drop-day" as const,
+        productId: null,
+        draggable: false,
       }));
 
     return [...productItems, ...dropItems]
       .filter((item): item is NonNullable<(typeof productItems)[number]> => Boolean(item))
       .sort((left, right) => left.date.localeCompare(right.date));
-  }, [data.dropDays, filteredProducts, scope]);
+  }, [filteredProducts, scope, visibleDropDays]);
 
   if (loading) {
     return (
@@ -1062,7 +2024,7 @@ export function PipelineApp() {
           </div>
         </header>
 
-        <div className="grid gap-6 xl:grid-cols-[250px_minmax(0,1fr)_380px]">
+        <div className="grid gap-6 xl:grid-cols-[250px_minmax(0,1fr)]">
           <aside className="space-y-4">
             <section className="rounded-[28px] border border-white/10 bg-white/5 p-4">
               <p className="mb-3 text-sm font-medium text-slate-300">Views</p>
@@ -1089,7 +2051,15 @@ export function PipelineApp() {
             </section>
 
             <section className="rounded-[28px] border border-white/10 bg-white/5 p-4">
-              <p className="mb-3 text-sm font-medium text-slate-300">Product scope</p>
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <p className="text-sm font-medium text-slate-300">Product scope</p>
+                <button
+                  className="text-xs uppercase tracking-[0.16em] text-slate-400 transition hover:text-white"
+                  onClick={() => setShowArchivedDrops((current) => !current)}
+                >
+                  {showArchivedDrops ? "Hide archived" : "Show archived"}
+                </button>
+              </div>
               <div className="space-y-2">
                 <button
                   className={cn(
@@ -1102,7 +2072,7 @@ export function PipelineApp() {
                 >
                   All products
                 </button>
-                {data.dropDays.map((dropDay) => (
+                {visibleDropDays.map((dropDay) => (
                   <button
                     key={dropDay.id}
                     className={cn(
@@ -1116,7 +2086,14 @@ export function PipelineApp() {
                       setView("products");
                     }}
                   >
-                    <div className="font-medium">{dropDay.name}</div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="font-medium">{dropDay.name}</div>
+                      {dropDay.archived ? (
+                        <span className="rounded-full border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.16em]">
+                          Archived
+                        </span>
+                      ) : null}
+                    </div>
                     <div className="mt-1 text-xs opacity-80">
                       Target {formatDate(dropDay.targetDate)}
                     </div>
@@ -1126,12 +2103,7 @@ export function PipelineApp() {
             </section>
           </aside>
 
-          <main
-            className={cn(
-              "space-y-6",
-              view === "products" && "xl:col-span-2",
-            )}
-          >
+          <main className="space-y-6">
             {error ? (
               <Banner tone="error" message={error} onDismiss={() => setError("")} />
             ) : null}
@@ -1143,162 +2115,189 @@ export function PipelineApp() {
               <DashboardView
                 scopeLabel={getScopeLabel(scope, data.dropDays)}
                 filteredProducts={filteredProducts}
-                upcomingBulkReady={upcomingBulkReady}
-                upcomingArrivals={upcomingArrivals}
-                dropDays={data.dropDays}
+                upcomingMilestones={upcomingMilestones}
+                actionCenterItems={actionCenterItems}
+                dashboardAgenda={dashboardAgenda}
+                onOpenActionFilter={openActionFilter}
+                onOpenAgendaProduct={(productId) => {
+                  const product = productsWithCosts.find((item) => item.id === productId);
+                  if (product) {
+                    openProduct(product);
+                  }
+                }}
               />
             ) : null}
 
             {view === "products" ? (
               <>
-                <Card title="Add Product">
-                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    <Input
-                      label="Product name"
-                      value={productDraft.name}
-                      onChange={(value) =>
-                        setProductDraft((current) => ({ ...current, name: value }))
-                      }
-                    />
-                    <Input
-                      label="SKU / style code"
-                      value={productDraft.sku}
-                      onChange={(value) =>
-                        setProductDraft((current) => ({ ...current, sku: value }))
-                      }
-                    />
-                    <Input
-                      label="Category"
-                      value={productDraft.category}
-                      onChange={(value) =>
-                        setProductDraft((current) => ({ ...current, category: value }))
-                      }
-                    />
-                    <Input
-                      label="Supplier"
-                      value={productDraft.supplier}
-                      onChange={(value) =>
-                        setProductDraft((current) => ({ ...current, supplier: value }))
-                      }
-                    />
-                    <Select
-                      label="Starting status"
-                      value={productDraft.status}
-                      onChange={(value) =>
-                        setProductDraft((current) => ({
-                          ...current,
-                          status: value as ProductStatus,
-                        }))
-                      }
-                      options={productStatuses.map((status) => ({
-                        value: status,
-                        label: getStatusLabel(status),
-                      }))}
-                    />
-                    <Select
-                      label="Drop day"
-                      value={productDraft.dropDayId ?? ""}
-                      onChange={(value) =>
-                        setProductDraft((current) => ({
-                          ...current,
-                          dropDayId: value || null,
-                        }))
-                      }
-                      options={[
-                        { value: "", label: "No drop assigned" },
-                        ...data.dropDays.map((dropDay) => ({
-                          value: dropDay.id,
-                          label: `${dropDay.name} (${formatDate(dropDay.targetDate)})`,
-                        })),
-                      ]}
-                    />
-                    <Input
-                      label="Target launch date"
-                      type="date"
-                      value={productDraft.targetLaunchDate ?? ""}
-                      onChange={(value) =>
-                        setProductDraft((current) => ({
-                          ...current,
-                          targetLaunchDate: value || null,
-                        }))
-                      }
-                    />
-                    <TextArea
-                      label="Notes"
-                      value={productDraft.notes}
-                      onChange={(value) =>
-                        setProductDraft((current) => ({ ...current, notes: value }))
-                      }
-                      className="md:col-span-2 xl:col-span-3"
-                    />
-                  </div>
-                  <div className="mt-4 flex justify-end">
-                    <button
-                      className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-70"
-                      onClick={() => void handleAddProduct()}
-                      disabled={saving}
-                    >
-                      <Plus className="h-4 w-4" />
-                      Add product
-                    </button>
+                <Card title="Products">
+                  <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                    <div className="space-y-3">
+                      <p className="max-w-3xl text-sm text-slate-300">
+                        Keep this page focused on finding, sorting, and acting on products. Open a
+                        product only when you need to edit details, and use the filters to narrow
+                        the list for new team members.
+                      </p>
+                      <div className="flex flex-wrap gap-3 text-sm">
+                        <div className="rounded-2xl border border-white/10 bg-slate-900/60 px-4 py-3 text-slate-300">
+                          <span className="font-medium text-white">{visibleProducts.length}</span>{" "}
+                          visible in {getScopeLabel(scope, data.dropDays)}
+                        </div>
+                        <div className="rounded-2xl border border-white/10 bg-slate-900/60 px-4 py-3 text-slate-300">
+                          <span className="font-medium text-white">Workflow:</span>{" "}
+                          {"Create product -> sample -> review -> bulk -> arrival"}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-3">
+                      {selectedProduct ? (
+                        <button
+                          className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                          onClick={() => setShowProductDrawer(true)}
+                        >
+                          Open selected product
+                        </button>
+                      ) : null}
+                      <button
+                        className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300"
+                        onClick={() => setShowAddProductModal(true)}
+                      >
+                        <Plus className="h-4 w-4" />
+                        New product
+                      </button>
+                    </div>
                   </div>
                 </Card>
 
-                <Card title="Products Workspace">
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                    <div>
-                      <p className="text-sm text-slate-300">
-                        {filteredProducts.length} products in {getScopeLabel(scope, data.dropDays)}.
-                        Use the board to move items by stage, or switch to list view to scan a
-                        larger catalog faster.
-                      </p>
+                <Card title="Products Workspace" className="sticky top-4 z-20">
+                  <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-end">
+                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                      <Input
+                        label="Search"
+                        value={productSearch}
+                        onChange={setProductSearch}
+                      />
+                      <Select
+                        label="Status"
+                        value={productStatusFilter}
+                        onChange={(value) =>
+                          setProductStatusFilter(value as ProductStatusFilter)
+                        }
+                        options={[
+                          { value: "all", label: "All statuses" },
+                          ...productStatuses.map((status) => ({
+                            value: status,
+                            label: getStatusLabel(status),
+                          })),
+                        ]}
+                      />
+                      <Select
+                        label="Category"
+                        value={productCategoryFilter}
+                        onChange={setProductCategoryFilter}
+                        options={[
+                          { value: "all", label: "All categories" },
+                          ...productCategories.map((category) => ({
+                            value: category,
+                            label: category,
+                          })),
+                        ]}
+                      />
+                      <Select
+                        label="Sort by"
+                        value={productSort}
+                        onChange={(value) => setProductSort(value as ProductSort)}
+                        options={[
+                          { value: "next-action", label: "Nearest milestone" },
+                          { value: "name", label: "Name" },
+                          { value: "cost-high", label: "Highest cost" },
+                          { value: "newest", label: "Newest first" },
+                        ]}
+                      />
                     </div>
-                    <div className="inline-flex rounded-2xl border border-white/10 bg-slate-900/70 p-1">
+
+                    <div className="flex flex-wrap items-center justify-end gap-3">
                       <button
-                        className={cn(
-                          "rounded-xl px-4 py-2 text-sm font-medium transition",
-                          productLayout === "board"
-                            ? "bg-emerald-400 text-slate-950"
-                            : "text-slate-300 hover:bg-white/5",
-                        )}
-                        onClick={() => setProductLayout("board")}
+                        className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                        onClick={saveCurrentFilter}
                       >
-                        Board view
+                        Save filter
                       </button>
                       <button
-                        className={cn(
-                          "rounded-xl px-4 py-2 text-sm font-medium transition",
-                          productLayout === "list"
-                            ? "bg-emerald-400 text-slate-950"
-                            : "text-slate-300 hover:bg-white/5",
-                        )}
-                        onClick={() => setProductLayout("list")}
+                        className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                        onClick={resetProductFilters}
                       >
-                        List view
+                        Reset
                       </button>
+                      <div className="inline-flex rounded-2xl border border-white/10 bg-slate-900/70 p-1">
+                        <button
+                          className={cn(
+                            "rounded-xl px-4 py-2 text-sm font-medium transition",
+                            productLayout === "board"
+                              ? "bg-emerald-400 text-slate-950"
+                              : "text-slate-300 hover:bg-white/5",
+                          )}
+                          onClick={() => setProductLayout("board")}
+                        >
+                          Board
+                        </button>
+                        <button
+                          className={cn(
+                            "rounded-xl px-4 py-2 text-sm font-medium transition",
+                            productLayout === "list"
+                              ? "bg-emerald-400 text-slate-950"
+                              : "text-slate-300 hover:bg-white/5",
+                          )}
+                          onClick={() => setProductLayout("list")}
+                        >
+                          List
+                        </button>
+                      </div>
                     </div>
                   </div>
+                  {savedFilters.length ? (
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {savedFilters.map((filter) => (
+                        <button
+                          key={filter.id}
+                          className="rounded-full border border-white/10 bg-slate-900/70 px-3 py-2 text-xs font-medium text-slate-200 transition hover:bg-white/10"
+                          onClick={() => applySavedFilter(filter)}
+                        >
+                          {filter.name}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  {productQuickFilter !== "all" ? (
+                    <div className="mt-4 flex items-center gap-3 rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-50">
+                      <span>
+                        Dashboard quick filter active:{" "}
+                        {actionCenterItems.find((item) => item.filter === productQuickFilter)?.label ??
+                          productQuickFilter}
+                      </span>
+                      <button
+                        className="rounded-xl border border-cyan-300/20 bg-cyan-400/10 px-3 py-2 text-xs font-medium text-cyan-50 transition hover:bg-cyan-400/20"
+                        onClick={() => setProductQuickFilter("all")}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  ) : null}
                 </Card>
 
                 {productLayout === "board" ? (
                   <ProductBoard
-                    products={filteredProducts}
+                    products={visibleProducts}
                     dropDays={data.dropDays}
-                    onSelectProduct={(product) => {
-                      setSelectedProductId(product.id);
-                      setProductEditor(product);
-                    }}
+                    onSelectProduct={openProduct}
                     onMoveStatus={handleQuickStatusUpdate}
                     selectedProductId={selectedProductId}
                   />
                 ) : (
                   <ProductListView
-                    products={filteredProducts}
+                    products={visibleProducts}
                     dropDays={data.dropDays}
-                    onSelectProduct={(product) => {
-                      setSelectedProductId(product.id);
-                      setProductEditor(product);
-                    }}
+                    onSelectProduct={openProduct}
                     onMoveStatus={handleQuickStatusUpdate}
                     selectedProductId={selectedProductId}
                   />
@@ -1312,418 +2311,248 @@ export function PipelineApp() {
                 onPrevious={() => setCalendarMonth((current) => subMonths(current, 1))}
                 onNext={() => setCalendarMonth((current) => addMonths(current, 1))}
                 items={calendarItems}
+                mode={calendarViewMode}
+                onModeChange={setCalendarViewMode}
+                onEventClick={(item) => void handleCalendarEventOpen(item)}
+                onEventDrop={(item, targetDate) => void handleCalendarEventDrop(item, targetDate)}
               />
             ) : null}
 
             {view === "drops" ? (
               <>
-                <Card title="Create Drop Day">
-                  <div className="grid gap-3 md:grid-cols-3">
-                    <Input
-                      label="Drop name"
-                      value={dropDraft.name}
-                      onChange={(value) =>
-                        setDropDraft((current) => ({ ...current, name: value }))
-                      }
-                    />
-                    <Input
-                      label="Drop date"
-                      type="date"
-                      value={dropDraft.targetDate}
-                      onChange={(value) =>
-                        setDropDraft((current) => ({ ...current, targetDate: value }))
-                      }
-                    />
-                    <TextArea
-                      label="Description"
-                      value={dropDraft.description}
-                      onChange={(value) =>
-                        setDropDraft((current) => ({ ...current, description: value }))
-                      }
-                      className="md:col-span-3"
-                    />
-                  </div>
-                  <div className="mt-4 flex justify-end">
+                <Card title="Drops">
+                  <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                    <div className="space-y-3">
+                      <p className="max-w-3xl text-sm text-slate-300">
+                        Keep drops simple: create the date, give the release a clear name, then
+                        assign products into that drop from the products page.
+                      </p>
+                    </div>
                     <button
-                      className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-70"
-                      onClick={() => void handleAddDropDay()}
-                      disabled={saving}
+                      className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300"
+                      onClick={() => setShowAddDropModal(true)}
                     >
                       <Plus className="h-4 w-4" />
-                      Add drop day
+                      New drop day
                     </button>
                   </div>
                 </Card>
 
                 <DropDayOverview
-                  dropDays={data.dropDays}
+                  dropDays={visibleDropDays}
                   products={productsWithCosts}
                   onOpenDrop={(dropDayId) => {
                     setScope(dropDayId);
                     setView("products");
                   }}
+                  onToggleArchive={(dropDayId, archived) =>
+                    void toggleDropArchive(dropDayId, archived)
+                  }
                 />
               </>
             ) : null}
           </main>
-
-          <aside
-            className={cn(
-              "space-y-6",
-              view === "products" && "xl:col-span-2 xl:col-start-2 xl:grid xl:grid-cols-2 xl:gap-6 xl:space-y-0",
-            )}
-          >
-            <Card title="Product Detail">
-              {productEditor ? (
-                <div className="space-y-4">
-                  <div className="grid gap-4 sm:grid-cols-[140px_minmax(0,1fr)]">
-                    <ProductImagePreview
-                      imagePath={productEditor.imagePath}
-                      productName={productEditor.name}
-                      variant="detail"
-                    />
-                    <div className="space-y-3 rounded-3xl border border-white/10 bg-slate-900/50 p-4">
-                      <div>
-                        <p className="text-sm font-medium text-white">Product image</p>
-                        <p className="mt-1 text-sm text-slate-400">
-                          Upload a product photo so each item is easier to recognize on the
-                          board.
-                        </p>
-                      </div>
-
-                      <label className="block">
-                        <span className="mb-2 block text-sm text-slate-300">
-                          Upload image file
-                        </span>
-                        <input
-                          className="w-full rounded-2xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-slate-200 file:mr-4 file:rounded-xl file:border-0 file:bg-emerald-400 file:px-3 file:py-2 file:text-sm file:font-medium file:text-slate-950 hover:file:bg-emerald-300"
-                          type="file"
-                          accept="image/png,image/jpeg,image/webp,image/gif"
-                          onChange={(event) => void handleProductImageUpload(event)}
-                          disabled={saving}
-                        />
-                      </label>
-
-                      <p className="text-xs text-slate-500">
-                        PNG, JPG, WebP, or GIF up to 5 MB. The image will show on the
-                        product card and detail view.
-                      </p>
-
-                      {productEditor.imagePath ? (
-                        <button
-                          className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-70"
-                          onClick={() => void handleRemoveProductImage()}
-                          disabled={saving}
-                        >
-                          Remove image
-                        </button>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  <div className="grid gap-3">
-                    <Input
-                      label="Product name"
-                      value={productEditor.name}
-                      onChange={(value) =>
-                        setProductEditor((current) =>
-                          current ? { ...current, name: value } : current,
-                        )
-                      }
-                    />
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <Input
-                        label="SKU"
-                        value={productEditor.sku}
-                        onChange={(value) =>
-                          setProductEditor((current) =>
-                            current ? { ...current, sku: value } : current,
-                          )
-                        }
-                      />
-                      <Input
-                        label="Category"
-                        value={productEditor.category}
-                        onChange={(value) =>
-                          setProductEditor((current) =>
-                            current ? { ...current, category: value } : current,
-                          )
-                        }
-                      />
-                    </div>
-                    <Input
-                      label="Supplier"
-                      value={productEditor.supplier}
-                      onChange={(value) =>
-                        setProductEditor((current) =>
-                          current ? { ...current, supplier: value } : current,
-                        )
-                      }
-                    />
-                    <Select
-                      label="Status"
-                      value={productEditor.status}
-                      onChange={(value) =>
-                        setProductEditor((current) =>
-                          current ? { ...current, status: value as ProductStatus } : current,
-                        )
-                      }
-                      options={productStatuses.map((status) => ({
-                        value: status,
-                        label: getStatusLabel(status),
-                      }))}
-                    />
-                    <Select
-                      label="Drop day"
-                      value={productEditor.dropDayId ?? ""}
-                      onChange={(value) =>
-                        setProductEditor((current) =>
-                          current ? { ...current, dropDayId: value || null } : current,
-                        )
-                      }
-                      options={[
-                        { value: "", label: "No drop assigned" },
-                        ...data.dropDays.map((dropDay) => ({
-                          value: dropDay.id,
-                          label: dropDay.name,
-                        })),
-                      ]}
-                    />
-                    <div className="grid gap-3 sm:grid-cols-3">
-                      <Input
-                        label="Sample ordered"
-                        type="date"
-                        value={productEditor.sampleOrderedAt ?? ""}
-                        onChange={(value) =>
-                          setProductEditor((current) =>
-                            current ? { ...current, sampleOrderedAt: value || null } : current,
-                          )
-                        }
-                      />
-                      <Input
-                        label="Sample production business days"
-                        type="number"
-                        value={String(productEditor.sampleProductionDays)}
-                        onChange={(value) =>
-                          setProductEditor((current) =>
-                            current
-                              ? { ...current, sampleProductionDays: Number(value || "0") }
-                              : current,
-                          )
-                        }
-                      />
-                      <Input
-                        label="Sample shipping business days"
-                        type="number"
-                        value={String(productEditor.sampleShippingDays)}
-                        onChange={(value) =>
-                          setProductEditor((current) =>
-                            current
-                              ? { ...current, sampleShippingDays: Number(value || "0") }
-                              : current,
-                          )
-                        }
-                      />
-                    </div>
-                    <div className="grid gap-3 sm:grid-cols-3">
-                      <Input
-                        label="Bulk start"
-                        type="date"
-                        value={productEditor.bulkStartDate ?? ""}
-                        onChange={(value) =>
-                          setProductEditor((current) =>
-                            current ? { ...current, bulkStartDate: value || null } : current,
-                          )
-                        }
-                      />
-                      <Input
-                        label="Production business days"
-                        type="number"
-                        value={String(productEditor.productionDays)}
-                        onChange={(value) =>
-                          setProductEditor((current) =>
-                            current
-                              ? { ...current, productionDays: Number(value || "0") }
-                              : current,
-                          )
-                        }
-                      />
-                      <Input
-                        label="Shipping business days"
-                        type="number"
-                        value={String(productEditor.shippingDays)}
-                        onChange={(value) =>
-                          setProductEditor((current) =>
-                            current
-                              ? { ...current, shippingDays: Number(value || "0") }
-                              : current,
-                          )
-                        }
-                      />
-                    </div>
-                    <Input
-                      label="Target launch date"
-                      type="date"
-                      value={productEditor.targetLaunchDate ?? ""}
-                      onChange={(value) =>
-                        setProductEditor((current) =>
-                          current ? { ...current, targetLaunchDate: value || null } : current,
-                        )
-                      }
-                    />
-                    <TextArea
-                      label="Notes"
-                      value={productEditor.notes}
-                      onChange={(value) =>
-                        setProductEditor((current) =>
-                          current ? { ...current, notes: value } : current,
-                        )
-                      }
-                    />
-                  </div>
-
-                  <TimelineSummary product={productEditor} />
-
-                  <div className="flex justify-end">
-                    <button
-                      className="rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-70"
-                      onClick={() => void handleSaveProduct()}
-                      disabled={saving}
-                    >
-                      Save changes
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <EmptyState
-                  title="No product selected"
-                  description="Select a product card to edit notes, sample dates, bulk timing, and shipping timing."
-                />
-              )}
-            </Card>
-
-            <Card title="Costs">
-              {selectedProduct ? (
-                <div className="space-y-4">
-                  <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-4">
-                    <p className="text-xs uppercase tracking-[0.2em] text-emerald-200">
-                      Total product cost
-                    </p>
-                    <p className="mt-2 text-3xl font-semibold text-white">
-                      {currency(getProductTotalCost(selectedProduct))}
-                    </p>
-                    <p className="mt-1 text-sm text-emerald-100/80">
-                      {selectedProduct.costs.length} expense entries for {selectedProduct.name}
-                    </p>
-                  </div>
-
-                  <div className="grid gap-3">
-                    <Input
-                      label="Cost title"
-                      value={costDraft.title}
-                      onChange={(value) =>
-                        setCostDraft((current) => ({ ...current, title: value }))
-                      }
-                    />
-                    <TextArea
-                      label="Description"
-                      value={costDraft.description}
-                      onChange={(value) =>
-                        setCostDraft((current) => ({ ...current, description: value }))
-                      }
-                    />
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <Input
-                        label="Amount"
-                        type="number"
-                        value={String(costDraft.amount)}
-                        onChange={(value) =>
-                          setCostDraft((current) => ({
-                            ...current,
-                            amount: Number(value || "0"),
-                          }))
-                        }
-                      />
-                      <Input
-                        label="Entry date"
-                        type="date"
-                        value={costDraft.entryDate}
-                        onChange={(value) =>
-                          setCostDraft((current) => ({ ...current, entryDate: value }))
-                        }
-                      />
-                    </div>
-                    <Select
-                      label="Cost type"
-                      value={costDraft.costType}
-                      onChange={(value) =>
-                        setCostDraft((current) => ({
-                          ...current,
-                          costType: value as CostEntry["costType"],
-                        }))
-                      }
-                      options={costTypes.map((type) => ({
-                        value: type,
-                        label: type.charAt(0).toUpperCase() + type.slice(1),
-                      }))}
-                    />
-                  </div>
-
-                  <button
-                    className="w-full rounded-2xl bg-slate-100 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-70"
-                    onClick={() => void handleAddCostEntry()}
-                    disabled={saving}
-                  >
-                    Add cost entry
-                  </button>
-
-                  <div className="space-y-3">
-                    {selectedProduct.costs.length ? (
-                      [...selectedProduct.costs]
-                        .sort((left, right) => right.entryDate.localeCompare(left.entryDate))
-                        .map((entry) => (
-                          <div
-                            key={entry.id}
-                            className="rounded-2xl border border-white/10 bg-slate-900/70 p-4"
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <p className="font-medium text-white">{entry.title}</p>
-                                <p className="mt-1 text-sm text-slate-400">
-                                  {entry.description || "No description"}
-                                </p>
-                              </div>
-                              <div className="text-right">
-                                <p className="font-medium text-emerald-200">
-                                  {currency(entry.amount)}
-                                </p>
-                                <p className="mt-1 text-xs uppercase tracking-[0.16em] text-slate-500">
-                                  {entry.costType}
-                                </p>
-                              </div>
-                            </div>
-                            <p className="mt-3 text-xs text-slate-500">
-                              {formatDate(entry.entryDate)}
-                            </p>
-                          </div>
-                        ))
-                    ) : (
-                      <EmptyState
-                        title="No costs yet"
-                        description="Add sample, material, freight, or packaging costs to understand total landed cost."
-                      />
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <EmptyState
-                  title="Choose a product"
-                  description="Cost entries belong to individual products, so select one from the board first."
-                />
-              )}
-            </Card>
-          </aside>
         </div>
+
+        {showAddProductModal ? (
+          <ModalShell
+            title="Create Product"
+            description="Add the basics first. You can fill in sample timing, bulk timing, costs, and images after the product exists."
+            onClose={() => setShowAddProductModal(false)}
+          >
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              <Input
+                label="Product name"
+                value={productDraft.name}
+                onChange={(value) =>
+                  setProductDraft((current) => ({ ...current, name: value }))
+                }
+              />
+              <Input
+                label="Category"
+                value={productDraft.category}
+                onChange={(value) =>
+                  setProductDraft((current) => ({ ...current, category: value }))
+                }
+              />
+              <Input
+                label="Supplier"
+                value={productDraft.supplier}
+                onChange={(value) =>
+                  setProductDraft((current) => ({ ...current, supplier: value }))
+                }
+              />
+              <Select
+                label="Starting status"
+                value={productDraft.status}
+                onChange={(value) =>
+                  setProductDraft((current) => ({
+                    ...current,
+                    status: value as ProductStatus,
+                  }))
+                }
+                options={productStatuses.map((status) => ({
+                  value: status,
+                  label: getStatusLabel(status),
+                }))}
+              />
+              <Select
+                label="Drop day"
+                value={productDraft.dropDayId ?? ""}
+                onChange={(value) =>
+                  setProductDraft((current) => ({
+                    ...current,
+                    dropDayId: value || null,
+                  }))
+                }
+                options={[
+                  { value: "", label: "No drop assigned" },
+                  ...data.dropDays.map((dropDay) => ({
+                    value: dropDay.id,
+                    label: `${dropDay.name} (${formatDate(dropDay.targetDate)})`,
+                  })),
+                ]}
+              />
+              <Input
+                label="Owner"
+                value={productDraft.owner}
+                onChange={(value) =>
+                  setProductDraft((current) => ({ ...current, owner: value }))
+                }
+              />
+              <Select
+                label="Priority"
+                value={productDraft.priority}
+                onChange={(value) =>
+                  setProductDraft((current) => ({
+                    ...current,
+                    priority: value as ProductPriority,
+                  }))
+                }
+                options={productPriorityOptions}
+              />
+              <Input
+                label="Due date"
+                type="date"
+                value={productDraft.dueDate ?? ""}
+                onChange={(value) =>
+                  setProductDraft((current) => ({
+                    ...current,
+                    dueDate: value || null,
+                  }))
+                }
+              />
+              <Input
+                label="Manual next action"
+                value={productDraft.nextAction}
+                onChange={(value) =>
+                  setProductDraft((current) => ({ ...current, nextAction: value }))
+                }
+              />
+              <TextArea
+                label="Notes"
+                value={productDraft.notes}
+                onChange={(value) =>
+                  setProductDraft((current) => ({ ...current, notes: value }))
+                }
+                className="md:col-span-2 xl:col-span-2"
+              />
+            </div>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                onClick={() => setShowAddProductModal(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-70"
+                onClick={() => void handleAddProduct()}
+                disabled={saving}
+              >
+                <Plus className="h-4 w-4" />
+                Create product
+              </button>
+            </div>
+          </ModalShell>
+        ) : null}
+
+        {showAddDropModal ? (
+          <ModalShell
+            title="Create Drop Day"
+            description="Use a drop when a group of products is planned for the same release window."
+            onClose={() => setShowAddDropModal(false)}
+          >
+            <div className="grid gap-3 md:grid-cols-2">
+              <Input
+                label="Drop name"
+                value={dropDraft.name}
+                onChange={(value) =>
+                  setDropDraft((current) => ({ ...current, name: value }))
+                }
+              />
+              <Input
+                label="Drop date"
+                type="date"
+                value={dropDraft.targetDate}
+                onChange={(value) =>
+                  setDropDraft((current) => ({ ...current, targetDate: value }))
+                }
+              />
+              <TextArea
+                label="Description"
+                value={dropDraft.description}
+                onChange={(value) =>
+                  setDropDraft((current) => ({ ...current, description: value }))
+                }
+                className="md:col-span-2"
+              />
+            </div>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                onClick={() => setShowAddDropModal(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-70"
+                onClick={() => void handleAddDropDay()}
+                disabled={saving}
+              >
+                <Plus className="h-4 w-4" />
+                Create drop day
+              </button>
+            </div>
+          </ModalShell>
+        ) : null}
+
+        <ProductDrawer
+          open={showProductDrawer && Boolean(productEditor) && Boolean(selectedProduct)}
+          productEditor={productEditor}
+          selectedProduct={selectedProduct}
+          saving={saving}
+          drawerTab={drawerTab}
+          setDrawerTab={setDrawerTab}
+          costDraft={costDraft}
+          costEditor={costEditor}
+          dropDays={data.dropDays}
+          setProductEditor={setProductEditor}
+          setCostDraft={setCostDraft}
+          setCostEditor={setCostEditor}
+          handleProductImageUpload={handleProductImageUpload}
+          handleRemoveProductImage={handleRemoveProductImage}
+          handleSaveProduct={handleSaveProduct}
+          handleAddCostEntry={handleAddCostEntry}
+          handleSaveEditedCost={handleSaveEditedCost}
+          startEditingCost={startEditingCost}
+          handleDeleteCostEntry={handleDeleteCostEntry}
+          cancelEditingCost={cancelEditingCost}
+          onClose={() => {
+            setShowProductDrawer(false);
+            cancelEditingCost();
+          }}
+        />
       </div>
     </div>
   );
@@ -1732,20 +2561,36 @@ export function PipelineApp() {
 function DashboardView({
   scopeLabel,
   filteredProducts,
-  upcomingBulkReady,
-  upcomingArrivals,
-  dropDays,
+  upcomingMilestones,
+  actionCenterItems,
+  dashboardAgenda,
+  onOpenActionFilter,
+  onOpenAgendaProduct,
 }: {
   scopeLabel: string;
   filteredProducts: ProductWithCosts[];
-  upcomingBulkReady: { product: ProductWithCosts; bulkReadyDate: string | null }[];
-  upcomingArrivals: { product: ProductWithCosts; arrivalDate: string | null }[];
-  dropDays: DropDay[];
+  upcomingMilestones: UpcomingMilestoneItem[];
+  actionCenterItems: {
+    id: string;
+    label: string;
+    count: number;
+    description: string;
+    accent: string;
+    tone: string;
+    filter: ProductQuickFilter;
+  }[];
+  dashboardAgenda: PlanningAgendaItem[];
+  onOpenActionFilter: (filter: ProductQuickFilter) => void;
+  onOpenAgendaProduct: (productId: string) => void;
 }) {
   const totalTrackedCost = filteredProducts.reduce(
     (sum, product) => sum + getProductTotalCost(product),
     0,
   );
+  const [showAllActionCards, setShowAllActionCards] = useState(false);
+  const visibleActionCenterItems = showAllActionCards
+    ? actionCenterItems
+    : actionCenterItems.filter((item) => item.count > 0);
 
   return (
     <>
@@ -1777,49 +2622,670 @@ function DashboardView({
       </div>
 
       <div className="grid gap-6 xl:grid-cols-2">
-        <Card title="Upcoming Bulk Ready Dates">
+        <Card title="Action Center">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <p className="text-sm text-slate-400">
+              Current-state alerts. Planning deadlines live below in the agenda.
+            </p>
+            {actionCenterItems.some((item) => item.count === 0) ? (
+              <button
+                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-white transition hover:bg-white/10"
+                onClick={() => setShowAllActionCards((current) => !current)}
+              >
+                {showAllActionCards ? "Hide zero cards" : "Show all"}
+              </button>
+            ) : null}
+          </div>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {(visibleActionCenterItems.length ? visibleActionCenterItems : actionCenterItems).map(
+              (item) => (
+              <button
+                key={item.id}
+                className={cn(
+                  "rounded-2xl border p-4 text-left transition hover:brightness-110",
+                  item.tone,
+                )}
+                onClick={() => onOpenActionFilter(item.filter)}
+              >
+                <p className="text-xs uppercase tracking-[0.16em] text-slate-300">{item.label}</p>
+                <p className={cn("mt-2 text-2xl font-semibold", item.accent)}>{item.count}</p>
+                <p className="mt-2 text-sm text-slate-300">{item.description}</p>
+              </button>
+              ),
+            )}
+          </div>
+        </Card>
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-2">
+        <Card title="Planning Agenda">
           <div className="space-y-3">
-            {upcomingBulkReady.length ? (
-              upcomingBulkReady.map(({ product, bulkReadyDate }) => (
-                <TimelineRow
-                  key={`${product.id}-bulk-ready`}
-                  title={product.name}
-                  subtitle={getDropDayName(dropDays, product.dropDayId)}
-                  date={bulkReadyDate}
-                  icon={Clock3}
-                />
+            {dashboardAgenda.length ? (
+              dashboardAgenda.map((item) => (
+                <button
+                  key={item.id}
+                  className={cn(
+                    "flex w-full items-start justify-between gap-4 rounded-2xl border p-4 text-left transition hover:bg-white/[0.04]",
+                    item.status === "late"
+                      ? "border-rose-400/25 bg-rose-400/10"
+                      : item.status === "soon"
+                        ? "border-amber-400/25 bg-amber-400/10"
+                        : "border-white/10 bg-slate-900/70",
+                  )}
+                  onClick={() => onOpenAgendaProduct(item.productId)}
+                >
+                  <div>
+                    <p className="font-medium text-white">{item.title}</p>
+                    <p className="mt-1 text-sm text-slate-300">{item.detail}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="font-medium text-white">{formatDate(item.date)}</p>
+                    <p className="mt-1 text-xs text-slate-400">
+                      {daysUntil(item.date) === null ? "" : `${daysUntil(item.date)} days`}
+                    </p>
+                  </div>
+                </button>
               ))
             ) : (
               <EmptyState
-                title="No bulk dates yet"
-                description="Set bulk start dates and production days to forecast when product runs will be complete."
+                title="No planning deadlines"
+                description="Assign drop days and production timings to see reverse-planning deadlines here."
               />
             )}
           </div>
         </Card>
 
-        <Card title="Upcoming Arrival Dates">
+        <Card title="Upcoming Milestones">
           <div className="space-y-3">
-            {upcomingArrivals.length ? (
-              upcomingArrivals.map(({ product, arrivalDate }) => (
+            {upcomingMilestones.length ? (
+              upcomingMilestones.map((item) => (
                 <TimelineRow
-                  key={`${product.id}-arrival`}
-                  title={product.name}
-                  subtitle={getDropDayName(dropDays, product.dropDayId)}
-                  date={arrivalDate}
-                  icon={Truck}
+                  key={item.id}
+                  title={item.label}
+                  subtitle={item.type === "arrival" ? "Arrival milestone" : "Bulk ready milestone"}
+                  date={item.date}
+                  icon={item.type === "arrival" ? Truck : Clock3}
                 />
               ))
             ) : (
               <EmptyState
-                title="No arrival dates yet"
-                description="Once you add production and shipping business-day lead times, estimated delivery dates will show up here."
+                title="No milestones yet"
+                description="Once you add production and shipping business-day lead times, upcoming milestones will show here."
               />
             )}
           </div>
         </Card>
       </div>
     </>
+  );
+}
+
+function ModalShell({
+  title,
+  description,
+  children,
+  onClose,
+}: {
+  title: string;
+  description: string;
+  children: React.ReactNode;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm">
+      <div className="max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-[32px] border border-white/10 bg-slate-950 shadow-2xl shadow-black/40">
+        <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-white/10 bg-slate-950/95 px-6 py-5 backdrop-blur">
+          <div>
+            <h2 className="text-xl font-semibold text-white">{title}</h2>
+            <p className="mt-2 max-w-2xl text-sm text-slate-400">{description}</p>
+          </div>
+          <button
+            className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-white transition hover:bg-white/10"
+            onClick={onClose}
+          >
+            Close
+          </button>
+        </div>
+        <div className="p-6">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function ProductDrawer({
+  open,
+  productEditor,
+  selectedProduct,
+  saving,
+  drawerTab,
+  setDrawerTab,
+  costDraft,
+  costEditor,
+  dropDays,
+  setProductEditor,
+  setCostDraft,
+  setCostEditor,
+  handleProductImageUpload,
+  handleRemoveProductImage,
+  handleSaveProduct,
+  handleAddCostEntry,
+  handleSaveEditedCost,
+  startEditingCost,
+  handleDeleteCostEntry,
+  cancelEditingCost,
+  onClose,
+}: {
+  open: boolean;
+  productEditor: Product | null;
+  selectedProduct: ProductWithCosts | null;
+  saving: boolean;
+  drawerTab: DrawerTab;
+  setDrawerTab: React.Dispatch<React.SetStateAction<DrawerTab>>;
+  costDraft: CostEntryDraft;
+  costEditor: CostEditorState;
+  dropDays: DropDay[];
+  setProductEditor: React.Dispatch<React.SetStateAction<Product | null>>;
+  setCostDraft: React.Dispatch<React.SetStateAction<CostEntryDraft>>;
+  setCostEditor: React.Dispatch<React.SetStateAction<CostEditorState>>;
+  handleProductImageUpload: (event: ChangeEvent<HTMLInputElement>) => Promise<void>;
+  handleRemoveProductImage: () => Promise<void>;
+  handleSaveProduct: () => Promise<void>;
+  handleAddCostEntry: () => Promise<void>;
+  handleSaveEditedCost: () => Promise<void>;
+  startEditingCost: (entry: CostEntry) => void;
+  handleDeleteCostEntry: (entryId: string) => Promise<void>;
+  cancelEditingCost: () => void;
+  onClose: () => void;
+}) {
+  if (!open || !productEditor || !selectedProduct) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm">
+      <button className="absolute inset-0 cursor-default" onClick={onClose} aria-label="Close" />
+      <div className="absolute inset-y-0 right-0 w-full max-w-[760px] overflow-y-auto border-l border-white/10 bg-slate-950 shadow-2xl shadow-black/50">
+        <div className="sticky top-0 z-10 border-b border-white/10 bg-slate-950/95 px-5 py-4 backdrop-blur">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-4">
+              <ProductImagePreview
+                imagePath={productEditor.imagePath}
+                productName={productEditor.name}
+                variant="list"
+              />
+              <div>
+                <p className="text-xs uppercase tracking-[0.18em] text-slate-500">
+                  {getStatusLabel(productEditor.status)}
+                </p>
+                <h2 className="mt-1 text-2xl font-semibold text-white">{productEditor.name}</h2>
+                <p className="mt-2 text-sm text-slate-400">
+                  {getDropDayName(dropDays, productEditor.dropDayId)} · Next action:{" "}
+                  {getProductNextAction(productEditor)}
+                </p>
+              </div>
+            </div>
+            <button
+              className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-white transition hover:bg-white/10"
+              onClick={onClose}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+
+        <div className="space-y-5 p-5">
+          <div className="inline-flex rounded-2xl border border-white/10 bg-slate-900/70 p-1">
+            {(["overview", "timeline", "costs", "activity"] as DrawerTab[]).map((tab) => (
+              <button
+                key={tab}
+                className={cn(
+                  "rounded-xl px-4 py-2 text-sm font-medium capitalize transition",
+                  drawerTab === tab
+                    ? "bg-emerald-400 text-slate-950"
+                    : "text-slate-300 hover:bg-white/5",
+                )}
+                onClick={() => setDrawerTab(tab)}
+              >
+                {tab}
+              </button>
+            ))}
+          </div>
+
+          {drawerTab === "overview" ? (
+            <Card title="Overview">
+              <div className="space-y-4">
+                <div className="grid gap-4 sm:grid-cols-[140px_minmax(0,1fr)]">
+                  <ProductImagePreview
+                    imagePath={productEditor.imagePath}
+                    productName={productEditor.name}
+                    variant="detail"
+                  />
+                  <div className="space-y-3 rounded-3xl border border-white/10 bg-slate-900/50 p-4">
+                    <div>
+                      <p className="text-sm font-medium text-white">Product image</p>
+                      <p className="mt-1 text-sm text-slate-400">
+                        Upload a product photo so each item is easier to recognize on the board.
+                      </p>
+                    </div>
+
+                    <label className="block">
+                      <span className="mb-2 block text-sm text-slate-300">Upload image file</span>
+                      <input
+                        className="w-full rounded-2xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-slate-200 file:mr-4 file:rounded-xl file:border-0 file:bg-emerald-400 file:px-3 file:py-2 file:text-sm file:font-medium file:text-slate-950 hover:file:bg-emerald-300"
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/gif"
+                        onChange={(event) => void handleProductImageUpload(event)}
+                        disabled={saving}
+                      />
+                    </label>
+
+                    {productEditor.imagePath ? (
+                      <button
+                        className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-70"
+                        onClick={() => void handleRemoveProductImage()}
+                        disabled={saving}
+                      >
+                        Remove image
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="grid gap-3">
+                  <Input
+                    label="Product name"
+                    value={productEditor.name}
+                    onChange={(value) =>
+                      setProductEditor((current) => (current ? { ...current, name: value } : current))
+                    }
+                  />
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Input
+                      label="Category"
+                      value={productEditor.category}
+                      onChange={(value) =>
+                        setProductEditor((current) =>
+                          current ? { ...current, category: value } : current,
+                        )
+                      }
+                    />
+                    <Input
+                      label="Supplier"
+                      value={productEditor.supplier}
+                      onChange={(value) =>
+                        setProductEditor((current) =>
+                          current ? { ...current, supplier: value } : current,
+                        )
+                      }
+                    />
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Select
+                      label="Status"
+                      value={productEditor.status}
+                      onChange={(value) =>
+                        setProductEditor((current) =>
+                          current ? { ...current, status: value as ProductStatus } : current,
+                        )
+                      }
+                      options={productStatuses.map((status) => ({
+                        value: status,
+                        label: getStatusLabel(status),
+                      }))}
+                    />
+                    <Select
+                      label="Drop day"
+                      value={productEditor.dropDayId ?? ""}
+                      onChange={(value) =>
+                        setProductEditor((current) =>
+                          current ? { ...current, dropDayId: value || null } : current,
+                        )
+                      }
+                      options={[
+                        { value: "", label: "No drop assigned" },
+                        ...dropDays.map((dropDay) => ({
+                          value: dropDay.id,
+                          label: dropDay.name,
+                        })),
+                      ]}
+                    />
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Input
+                      label="Owner"
+                      value={productEditor.owner}
+                      onChange={(value) =>
+                        setProductEditor((current) => (current ? { ...current, owner: value } : current))
+                      }
+                    />
+                    <Select
+                      label="Priority"
+                      value={productEditor.priority}
+                      onChange={(value) =>
+                        setProductEditor((current) =>
+                          current ? { ...current, priority: value as ProductPriority } : current,
+                        )
+                      }
+                      options={productPriorityOptions}
+                    />
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Input
+                      label="Manual next action"
+                      value={productEditor.nextAction}
+                      onChange={(value) =>
+                        setProductEditor((current) =>
+                          current ? { ...current, nextAction: value } : current,
+                        )
+                      }
+                    />
+                    <Input
+                      label="Due date"
+                      type="date"
+                      value={productEditor.dueDate ?? ""}
+                      onChange={(value) =>
+                        setProductEditor((current) =>
+                          current ? { ...current, dueDate: value || null } : current,
+                        )
+                      }
+                    />
+                  </div>
+                  <TextArea
+                    label="Notes"
+                    value={productEditor.notes}
+                    onChange={(value) =>
+                      setProductEditor((current) => (current ? { ...current, notes: value } : current))
+                    }
+                  />
+                </div>
+              </div>
+            </Card>
+          ) : null}
+
+          {drawerTab === "timeline" ? (
+            <Card title="Timeline">
+              <div className="space-y-4">
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <Input
+                    label="Sample ordered"
+                    type="date"
+                    value={productEditor.sampleOrderedAt ?? ""}
+                    onChange={(value) =>
+                      setProductEditor((current) =>
+                        current ? { ...current, sampleOrderedAt: value || null } : current,
+                      )
+                    }
+                  />
+                  <Input
+                    label="Sample production business days"
+                    type="number"
+                    value={String(productEditor.sampleProductionDays)}
+                    onChange={(value) =>
+                      setProductEditor((current) =>
+                        current
+                          ? { ...current, sampleProductionDays: Number(value || "0") }
+                          : current,
+                      )
+                    }
+                  />
+                  <Input
+                    label="Sample shipping business days"
+                    type="number"
+                    value={String(productEditor.sampleShippingDays)}
+                    onChange={(value) =>
+                      setProductEditor((current) =>
+                        current
+                          ? { ...current, sampleShippingDays: Number(value || "0") }
+                          : current,
+                      )
+                    }
+                  />
+                </div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <Input
+                    label="Bulk start"
+                    type="date"
+                    value={productEditor.bulkStartDate ?? ""}
+                    onChange={(value) =>
+                      setProductEditor((current) =>
+                        current ? { ...current, bulkStartDate: value || null } : current,
+                      )
+                    }
+                  />
+                  <Input
+                    label="Production business days"
+                    type="number"
+                    value={String(productEditor.productionDays)}
+                    onChange={(value) =>
+                      setProductEditor((current) =>
+                        current ? { ...current, productionDays: Number(value || "0") } : current,
+                      )
+                    }
+                  />
+                  <Input
+                    label="Shipping business days"
+                    type="number"
+                    value={String(productEditor.shippingDays)}
+                    onChange={(value) =>
+                      setProductEditor((current) =>
+                        current ? { ...current, shippingDays: Number(value || "0") } : current,
+                      )
+                    }
+                  />
+                </div>
+                <TimelineSummary product={productEditor} />
+              </div>
+            </Card>
+          ) : null}
+
+          {drawerTab === "costs" ? (
+            <Card title="Costs">
+              <div className="space-y-4">
+                <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-4">
+                  <p className="text-xs uppercase tracking-[0.2em] text-emerald-200">
+                    Total product cost
+                  </p>
+                  <p className="mt-2 text-3xl font-semibold text-white">
+                    {currency(getProductTotalCost(selectedProduct))}
+                  </p>
+                  <p className="mt-1 text-sm text-emerald-100/80">
+                    {selectedProduct.costs.length} expense entries for {selectedProduct.name}
+                  </p>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4">
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <p className="font-medium text-white">
+                      {costEditor.id ? "Edit cost entry" : "Add cost entry"}
+                    </p>
+                    {costEditor.id ? (
+                      <button
+                        className="text-sm text-slate-300 transition hover:text-white"
+                        onClick={cancelEditingCost}
+                      >
+                        Cancel edit
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="grid gap-3">
+                    <Input
+                      label="Cost title"
+                      value={costEditor.id ? costEditor.draft.title : costDraft.title}
+                      onChange={(value) =>
+                        costEditor.id
+                          ? setCostEditor((current) => ({
+                              ...current,
+                              draft: { ...current.draft, title: value },
+                            }))
+                          : setCostDraft((current) => ({ ...current, title: value }))
+                      }
+                    />
+                    <TextArea
+                      label="Description"
+                      value={costEditor.id ? costEditor.draft.description : costDraft.description}
+                      onChange={(value) =>
+                        costEditor.id
+                          ? setCostEditor((current) => ({
+                              ...current,
+                              draft: { ...current.draft, description: value },
+                            }))
+                          : setCostDraft((current) => ({ ...current, description: value }))
+                      }
+                    />
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <Input
+                        label="Amount"
+                        type="number"
+                        value={String(costEditor.id ? costEditor.draft.amount : costDraft.amount)}
+                        onChange={(value) =>
+                          costEditor.id
+                            ? setCostEditor((current) => ({
+                                ...current,
+                                draft: { ...current.draft, amount: Number(value || "0") },
+                              }))
+                            : setCostDraft((current) => ({
+                                ...current,
+                                amount: Number(value || "0"),
+                              }))
+                        }
+                      />
+                      <Input
+                        label="Entry date"
+                        type="date"
+                        value={costEditor.id ? costEditor.draft.entryDate : costDraft.entryDate}
+                        onChange={(value) =>
+                          costEditor.id
+                            ? setCostEditor((current) => ({
+                                ...current,
+                                draft: { ...current.draft, entryDate: value },
+                              }))
+                            : setCostDraft((current) => ({ ...current, entryDate: value }))
+                        }
+                      />
+                    </div>
+                    <Select
+                      label="Cost type"
+                      value={costEditor.id ? costEditor.draft.costType : costDraft.costType}
+                      onChange={(value) =>
+                        costEditor.id
+                          ? setCostEditor((current) => ({
+                              ...current,
+                              draft: {
+                                ...current.draft,
+                                costType: value as CostEntry["costType"],
+                              },
+                            }))
+                          : setCostDraft((current) => ({
+                              ...current,
+                              costType: value as CostEntry["costType"],
+                            }))
+                      }
+                      options={costTypes.map((type) => ({
+                        value: type,
+                        label: type.charAt(0).toUpperCase() + type.slice(1),
+                      }))}
+                    />
+                  </div>
+
+                  <button
+                    className="mt-4 w-full rounded-2xl bg-slate-100 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-70"
+                    onClick={() =>
+                      void (costEditor.id ? handleSaveEditedCost() : handleAddCostEntry())
+                    }
+                    disabled={saving}
+                  >
+                    {costEditor.id ? "Save cost changes" : "Add cost entry"}
+                  </button>
+                </div>
+
+                <div className="space-y-3">
+                  {selectedProduct.costs.length ? (
+                    [...selectedProduct.costs]
+                      .sort((left, right) => right.entryDate.localeCompare(left.entryDate))
+                      .map((entry) => (
+                        <div
+                          key={entry.id}
+                          className="rounded-2xl border border-white/10 bg-slate-900/70 p-4"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="font-medium text-white">{entry.title}</p>
+                              <p className="mt-1 text-sm text-slate-400">
+                                {entry.description || "No description"}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="font-medium text-emerald-200">
+                                {currency(entry.amount)}
+                              </p>
+                              <p className="mt-1 text-xs uppercase tracking-[0.16em] text-slate-500">
+                                {entry.costType}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="mt-3 flex items-center justify-between gap-3">
+                            <p className="text-xs text-slate-500">{formatDate(entry.entryDate)}</p>
+                            <div className="flex gap-2">
+                              <button
+                                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-white transition hover:bg-white/10"
+                                onClick={() => startEditingCost(entry)}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                className="rounded-xl border border-rose-400/20 bg-rose-400/10 px-3 py-2 text-xs font-medium text-rose-100 transition hover:bg-rose-400/20"
+                                onClick={() => void handleDeleteCostEntry(entry.id)}
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                  ) : (
+                    <EmptyState
+                      title="No costs yet"
+                      description="Add sample, material, freight, or packaging costs to understand total landed cost."
+                    />
+                  )}
+                </div>
+              </div>
+            </Card>
+          ) : null}
+
+          {drawerTab === "activity" ? (
+            <Card title="Activity">
+              <div className="space-y-3">
+                {selectedProduct.activity.length ? (
+                  selectedProduct.activity.map((entry) => (
+                    <div key={entry.id} className="rounded-2xl border border-white/10 bg-slate-900/70 p-4">
+                      <p className="font-medium text-white">{entry.message}</p>
+                      <p className="mt-2 text-sm text-slate-400">{entry.user}</p>
+                      <p className="mt-1 text-xs text-slate-500">{formatDate(entry.createdAt.slice(0, 10))}</p>
+                    </div>
+                  ))
+                ) : (
+                  <EmptyState
+                    title="No activity yet"
+                    description="Changes to this product will be tracked here so your team can see what happened."
+                  />
+                )}
+              </div>
+            </Card>
+          ) : null}
+
+          <div className="flex justify-end">
+            <button
+              className="rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-70"
+              onClick={() => void handleSaveProduct()}
+              disabled={saving}
+            >
+              Save changes
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1856,7 +3322,8 @@ function ProductBoard({
             <div className="space-y-3 xl:max-h-[720px] xl:overflow-y-auto xl:pr-1">
               {statusProducts.length ? (
                 statusProducts.map((product) => {
-                  const primaryMilestone = getProductPrimaryMilestone(product);
+                  const primaryMilestone = getProductPrimaryMilestone(product, dropDays);
+                  const nextAction = getProductNextAction(product);
 
                   return (
                     <button
@@ -1881,7 +3348,6 @@ function ProductBoard({
                               <p className="truncate font-medium text-white">{product.name}</p>
                               <p className="mt-1 truncate text-xs text-slate-400">
                                 {product.category}
-                                {product.sku ? ` · ${product.sku}` : ""}
                               </p>
                             </div>
                             <span className="shrink-0 rounded-full border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300">
@@ -1892,6 +3358,29 @@ function ProductBoard({
                           <p className="mt-2 truncate text-xs text-slate-500">
                             {getDropDayName(dropDays, product.dropDayId)}
                           </p>
+
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {product.owner ? (
+                              <span className="rounded-full border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300">
+                                {product.owner}
+                              </span>
+                            ) : null}
+                            <span
+                              className={cn(
+                                "rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.16em]",
+                                getPriorityBadgeClasses(product.priority),
+                              )}
+                            >
+                              {product.priority}
+                            </span>
+                          </div>
+
+                          <div className="mt-3 rounded-2xl border border-cyan-400/10 bg-cyan-400/5 px-3 py-2">
+                            <p className="text-[10px] uppercase tracking-[0.18em] text-cyan-200/70">
+                              Next action
+                            </p>
+                            <p className="mt-1 text-sm font-medium text-cyan-50">{nextAction}</p>
+                          </div>
 
                           <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] px-3 py-2">
                             <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">
@@ -1951,10 +3440,11 @@ function ProductListView({
   return (
     <Card title="Products List">
       <div className="overflow-x-auto rounded-3xl border border-white/10 bg-slate-900/60">
-        <div className="grid grid-cols-[minmax(0,2.2fr)_0.9fr_1.3fr_1.3fr_0.9fr_0.9fr] gap-3 border-b border-white/10 px-4 py-3 text-[11px] uppercase tracking-[0.18em] text-slate-500">
+        <div className="grid grid-cols-[minmax(0,2.2fr)_1fr_1.2fr_1.3fr_1.1fr_0.9fr_0.9fr] gap-3 border-b border-white/10 px-4 py-3 text-[11px] uppercase tracking-[0.18em] text-slate-500">
           <div>Product</div>
           <div>Status</div>
           <div>Drop</div>
+          <div>Next action</div>
           <div>Next date</div>
           <div>Cost</div>
           <div>Move</div>
@@ -1963,14 +3453,16 @@ function ProductListView({
         <div className="max-h-[720px] overflow-y-auto">
           {products.length ? (
             products.map((product) => {
-              const primaryMilestone = getProductPrimaryMilestone(product);
+              const primaryMilestone = getProductPrimaryMilestone(product, dropDays);
+              const nextAction = getProductNextAction(product);
 
               return (
                 <div
                   key={product.id}
                   className={cn(
-                    "grid grid-cols-[minmax(0,2.2fr)_0.9fr_1.3fr_1.3fr_0.9fr_0.9fr] items-center gap-3 border-b border-white/5 px-4 py-3 transition",
+                    "grid grid-cols-[minmax(0,2.2fr)_1fr_1.2fr_1.3fr_1.1fr_0.9fr_0.9fr] items-center gap-3 border-b border-white/5 px-4 py-3 transition",
                     selectedProductId === product.id && "bg-emerald-400/10",
+                    getUrgencyTone(product, dropDays),
                   )}
                 >
                   <button
@@ -1986,19 +3478,38 @@ function ProductListView({
                       <p className="truncate font-medium text-white">{product.name}</p>
                       <p className="truncate text-xs text-slate-400">
                         {product.category}
-                        {product.sku ? ` · ${product.sku}` : ""}
+                        {product.owner ? ` · ${product.owner}` : ""}
                       </p>
                     </div>
                   </button>
 
                   <div>
-                    <span className="rounded-full border border-white/10 px-2 py-1 text-[11px] text-slate-200">
+                    <span
+                      className={cn(
+                        "rounded-full border px-2 py-1 text-[11px] font-medium",
+                        getStatusBadgeClasses(product.status),
+                      )}
+                    >
                       {getStatusLabel(product.status)}
                     </span>
                   </div>
 
                   <div className="truncate text-sm text-slate-300">
                     {getDropDayName(dropDays, product.dropDayId)}
+                  </div>
+
+                  <div className="min-w-0">
+                    <div className="mb-1 flex flex-wrap gap-2">
+                      <span
+                        className={cn(
+                          "rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.16em]",
+                          getPriorityBadgeClasses(product.priority),
+                        )}
+                      >
+                        {product.priority}
+                      </span>
+                    </div>
+                    <p className="truncate text-sm font-medium text-cyan-50">{nextAction}</p>
                   </div>
 
                   <div className="min-w-0">
@@ -2092,20 +3603,25 @@ function CalendarView({
   onPrevious,
   onNext,
   items,
+  mode,
+  onModeChange,
+  onEventClick,
+  onEventDrop,
 }: {
   calendarMonth: Date;
   onPrevious: () => void;
   onNext: () => void;
-  items: {
-    id: string;
-    date: string;
-    label: string;
-    type: "sample" | "drop" | "bulk" | "arrival" | "drop-day";
-  }[];
+  items: CalendarItem[];
+  mode: "month" | "agenda";
+  onModeChange: (mode: "month" | "agenda") => void;
+  onEventClick: (item: CalendarItem) => void;
+  onEventDrop: (item: CalendarItem, targetDate: string) => void;
 }) {
   const calendarStart = startOfWeek(startOfMonth(calendarMonth), { weekStartsOn: 0 });
   const calendarEnd = endOfWeek(endOfMonth(calendarMonth), { weekStartsOn: 0 });
   const days = eachDayOfInterval({ start: calendarStart, end: calendarEnd });
+  const [draggedEventId, setDraggedEventId] = useState<string | null>(null);
+  const [dragOverDate, setDragOverDate] = useState<string | null>(null);
 
   const eventsByDate = items.reduce<Record<string, typeof items>>((accumulator, item) => {
     if (!accumulator[item.date]) {
@@ -2117,7 +3633,7 @@ function CalendarView({
 
   return (
     <Card title="Calendar / Schedule">
-      <div className="mb-5 flex items-center justify-between">
+      <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <button
           className="rounded-2xl border border-white/10 bg-slate-900/70 p-3 transition hover:bg-white/10"
           onClick={onPrevious}
@@ -2134,71 +3650,184 @@ function CalendarView({
         >
           <ChevronRight className="h-4 w-4" />
         </button>
+        <div className="inline-flex rounded-2xl border border-white/10 bg-slate-900/70 p-1">
+          <button
+            className={cn(
+              "rounded-xl px-4 py-2 text-sm font-medium transition",
+              mode === "month" ? "bg-emerald-400 text-slate-950" : "text-slate-300 hover:bg-white/5",
+            )}
+            onClick={() => onModeChange("month")}
+          >
+            Month
+          </button>
+          <button
+            className={cn(
+              "rounded-xl px-4 py-2 text-sm font-medium transition",
+              mode === "agenda" ? "bg-emerald-400 text-slate-950" : "text-slate-300 hover:bg-white/5",
+            )}
+            onClick={() => onModeChange("agenda")}
+          >
+            Agenda
+          </button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-7 gap-2 text-center text-xs uppercase tracking-[0.18em] text-slate-500">
-        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
-          <div key={day} className="rounded-2xl px-2 py-3">
-            {day}
+      <div className="mb-4 flex flex-wrap gap-2">
+        {[
+          ["sample", "Sample arrival"],
+          ["bulk", "Bulk ready"],
+          ["arrival", "Arrival"],
+          ["drop", "Target drop"],
+          ["drop-day", "Drop day"],
+        ].map(([type, label]) => (
+          <div
+            key={type}
+            className={cn(
+              "rounded-full border px-3 py-2 text-xs font-medium",
+              getCalendarEventClasses(type as CalendarItemType),
+            )}
+          >
+            {label}
           </div>
         ))}
       </div>
 
-      <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-7">
-        {days.map((day) => {
-          const dateKey = format(day, "yyyy-MM-dd");
-          const dailyEvents = eventsByDate[dateKey] ?? [];
-
-          return (
-            <div
-              key={dateKey}
-              className={cn(
-                "min-h-36 rounded-3xl border p-3",
-                isSameMonth(day, calendarMonth)
-                  ? "border-white/10 bg-slate-900/70"
-                  : "border-white/5 bg-slate-900/30",
-                isToday(day) && "border-emerald-400/40 bg-emerald-400/5",
-              )}
-            >
-              <div className="mb-3 flex items-center justify-between">
-                <span
-                  className={cn(
-                    "inline-flex h-8 w-8 items-center justify-center rounded-full text-sm font-medium",
-                    isToday(day) ? "bg-emerald-400 text-slate-950" : "bg-white/5 text-white",
-                  )}
-                >
-                  {format(day, "d")}
-                </span>
-                <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">
-                  {format(day, "EEE")}
-                </span>
+      {mode === "month" ? (
+        <>
+          <div className="grid grid-cols-7 gap-2 text-center text-xs uppercase tracking-[0.18em] text-slate-500">
+            {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
+              <div key={day} className="rounded-2xl px-2 py-3">
+                {day}
               </div>
+            ))}
+          </div>
 
-              <div className="space-y-2">
-                {dailyEvents.length ? (
-                  dailyEvents.map((event) => (
-                    <div
-                      key={event.id}
+          <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-7">
+            {days.map((day) => {
+              const dateKey = format(day, "yyyy-MM-dd");
+              const dailyEvents = eventsByDate[dateKey] ?? [];
+
+              return (
+                <div
+                  key={dateKey}
+                  className={cn(
+                    "min-h-36 rounded-3xl border p-3 transition",
+                    isSameMonth(day, calendarMonth)
+                      ? "border-white/10 bg-slate-900/70"
+                      : "border-white/5 bg-slate-900/30",
+                    isToday(day) && "border-emerald-400/40 bg-emerald-400/5",
+                    dragOverDate === dateKey && "border-cyan-300/60 bg-cyan-400/10",
+                  )}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    if (draggedEventId) {
+                      setDragOverDate(dateKey);
+                    }
+                  }}
+                  onDragLeave={() => {
+                    if (dragOverDate === dateKey) {
+                      setDragOverDate(null);
+                    }
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    const eventId = event.dataTransfer.getData("text/calendar-item");
+                    const droppedItem = items.find((item) => item.id === eventId);
+                    setDraggedEventId(null);
+                    setDragOverDate(null);
+
+                    if (!droppedItem || droppedItem.date === dateKey) {
+                      return;
+                    }
+
+                    onEventDrop(droppedItem, dateKey);
+                  }}
+                >
+                  <div className="mb-3 flex items-center justify-between">
+                    <span
                       className={cn(
-                        "rounded-2xl px-3 py-2 text-xs font-medium",
-                        event.type === "sample" && "bg-cyan-400/15 text-cyan-100",
-                        event.type === "arrival" && "bg-sky-400/15 text-sky-100",
-                        event.type === "bulk" && "bg-amber-400/15 text-amber-100",
-                        event.type === "drop" && "bg-violet-400/15 text-violet-100",
-                        event.type === "drop-day" && "bg-emerald-400/15 text-emerald-100",
+                        "inline-flex h-8 w-8 items-center justify-center rounded-full text-sm font-medium",
+                        isToday(day) ? "bg-emerald-400 text-slate-950" : "bg-white/5 text-white",
                       )}
                     >
-                      {event.label}
-                    </div>
-                  ))
-                ) : (
-                  <p className="text-xs text-slate-500">No scheduled items</p>
+                      {format(day, "d")}
+                    </span>
+                    <span className="text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                      {format(day, "EEE")}
+                    </span>
+                  </div>
+
+                  <div className="space-y-2">
+                    {dailyEvents.length ? (
+                      dailyEvents.map((event) => (
+                        <button
+                          key={event.id}
+                          type="button"
+                          draggable={event.draggable}
+                          onDragStart={(dragEvent) => {
+                            dragEvent.dataTransfer.setData("text/calendar-item", event.id);
+                            dragEvent.dataTransfer.effectAllowed = "move";
+                            setDraggedEventId(event.id);
+                          }}
+                          onDragEnd={() => {
+                            setDraggedEventId(null);
+                            setDragOverDate(null);
+                          }}
+                          onClick={() => onEventClick(event)}
+                          className={cn(
+                            "w-full rounded-2xl border px-3 py-2 text-left text-xs font-medium transition hover:brightness-110",
+                            getCalendarEventClasses(event.type),
+                            draggedEventId === event.id && "opacity-50",
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="leading-tight">{event.label}</span>
+                            {event.draggable ? (
+                              <span className="shrink-0 text-[10px] uppercase tracking-[0.16em] opacity-70">
+                                Drag
+                              </span>
+                            ) : null}
+                          </div>
+                        </button>
+                      ))
+                    ) : (
+                      <p className="text-xs text-slate-500">No scheduled items</p>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      ) : (
+        <div className="space-y-3">
+          {items.length ? (
+            items.map((item) => (
+              <button
+                key={item.id}
+                className={cn(
+                  "flex w-full items-center justify-between gap-4 rounded-2xl border p-4 text-left transition hover:brightness-110",
+                  getCalendarEventClasses(item.type),
                 )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+                onClick={() => onEventClick(item)}
+              >
+                <div>
+                  <p className="font-medium">{item.label}</p>
+                  <p className="mt-1 text-sm opacity-80">{formatDate(item.date)}</p>
+                </div>
+                {item.draggable ? (
+                  <span className="text-[10px] uppercase tracking-[0.16em] opacity-70">Drag in month</span>
+                ) : null}
+              </button>
+            ))
+          ) : (
+            <EmptyState
+              title="Nothing scheduled"
+              description="Once products have milestone dates, the agenda view will show them here in order."
+            />
+          )}
+        </div>
+      )}
     </Card>
   );
 }
@@ -2207,10 +3836,12 @@ function DropDayOverview({
   dropDays,
   products,
   onOpenDrop,
+  onToggleArchive,
 }: {
   dropDays: DropDay[];
   products: ProductWithCosts[];
   onOpenDrop: (dropDayId: string) => void;
+  onToggleArchive: (dropDayId: string, archived: boolean) => void;
 }) {
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -2223,22 +3854,43 @@ function DropDayOverview({
           );
 
           return (
-            <button
+            <div
               key={dropDay.id}
               className="rounded-[28px] border border-white/10 bg-white/5 p-5 text-left transition hover:bg-white/[0.08]"
-              onClick={() => onOpenDrop(dropDay.id)}
             >
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <h3 className="text-xl font-semibold text-white">{dropDay.name}</h3>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-xl font-semibold text-white">{dropDay.name}</h3>
+                    {dropDay.archived ? (
+                      <span className="rounded-full border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300">
+                        Archived
+                      </span>
+                    ) : null}
+                  </div>
                   <p className="mt-2 text-sm text-slate-300">{dropDay.description}</p>
                 </div>
-                <span className="rounded-full border border-white/10 bg-slate-900/70 px-3 py-1 text-xs text-slate-300">
-                  {formatDate(dropDay.targetDate)}
-                </span>
+                <div className="flex flex-col items-end gap-2">
+                  <span className="rounded-full border border-white/10 bg-slate-900/70 px-3 py-1 text-xs text-slate-300">
+                    {formatDate(dropDay.targetDate)}
+                  </span>
+                  <button
+                    className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-white transition hover:bg-white/10"
+                    onClick={() => onToggleArchive(dropDay.id, !dropDay.archived)}
+                  >
+                    {dropDay.archived ? "Restore" : "Archive"}
+                  </button>
+                </div>
               </div>
 
-              <div className="mt-5 grid gap-3 sm:grid-cols-3">
+              <button
+                className="mt-5 w-full rounded-2xl border border-white/10 bg-slate-900/60 px-4 py-3 text-left text-sm font-medium text-white transition hover:bg-slate-900"
+                onClick={() => onOpenDrop(dropDay.id)}
+              >
+                Open drop workspace
+              </button>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-3">
                 <MiniMetric
                   label="Products"
                   value={String(dropProducts.length)}
@@ -2257,7 +3909,7 @@ function DropDayOverview({
                   accent="text-emerald-200"
                 />
               </div>
-            </button>
+            </div>
           );
         })
       ) : (
@@ -2427,12 +4079,14 @@ function Banner({
 function Card({
   title,
   children,
+  className,
 }: {
   title: string;
   children: React.ReactNode;
+  className?: string;
 }) {
   return (
-    <section className="rounded-[28px] border border-white/10 bg-white/5 p-5 shadow-lg shadow-black/10">
+    <section className={cn("rounded-[28px] border border-white/10 bg-white/5 p-5 shadow-lg shadow-black/10", className)}>
       <h2 className="mb-4 text-lg font-semibold text-white">{title}</h2>
       {children}
     </section>

@@ -15,6 +15,14 @@ export const costTypes = [
 
 export type ProductStatus = (typeof productStatuses)[number];
 export type CostType = (typeof costTypes)[number];
+export type ProductPriority = "low" | "medium" | "high" | "urgent";
+
+export type ActivityEntry = {
+  id: string;
+  message: string;
+  user: string;
+  createdAt: string;
+};
 
 export type UserRecord = {
   id: string;
@@ -27,6 +35,7 @@ export type DropDay = {
   name: string;
   targetDate: string;
   description: string;
+  archived: boolean;
   createdAt: string;
 };
 
@@ -58,6 +67,11 @@ export type Product = {
   productionDays: number;
   shippingDays: number;
   targetLaunchDate: string | null;
+  nextAction: string;
+  owner: string;
+  priority: ProductPriority;
+  dueDate: string | null;
+  activity: ActivityEntry[];
   createdAt: string;
   updatedAt: string;
 };
@@ -88,6 +102,11 @@ export type ProductDraft = {
   productionDays: number;
   shippingDays: number;
   targetLaunchDate: string | null;
+  nextAction: string;
+  owner: string;
+  priority: ProductPriority;
+  dueDate: string | null;
+  activity: ActivityEntry[];
 };
 
 export type DropDayDraft = {
