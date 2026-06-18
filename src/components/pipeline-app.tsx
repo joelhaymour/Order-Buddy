@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import {
   addMonths,
   eachDayOfInterval,
@@ -536,6 +536,7 @@ export function PipelineApp() {
   const [showProductDrawer, setShowProductDrawer] = useState(false);
   const [showAddProductModal, setShowAddProductModal] = useState(false);
   const [showAddDropModal, setShowAddDropModal] = useState(false);
+  const [editingDropDayId, setEditingDropDayId] = useState<string | null>(null);
   const [showCalendarEventModal, setShowCalendarEventModal] = useState(false);
   const [productSearch, setProductSearch] = useState("");
   const [productStatusFilter, setProductStatusFilter] =
@@ -1061,6 +1062,67 @@ export function PipelineApp() {
     setShowAddDropModal(false);
     setSaving(false);
     setMessage("Drop day added.");
+  }
+
+  function openNewDropDayModal() {
+    setEditingDropDayId(null);
+    setDropDraft(emptyDropDayDraft);
+    setShowAddDropModal(true);
+  }
+
+  function openEditDropDayModal(dropDay: DropDay) {
+    setEditingDropDayId(dropDay.id);
+    setDropDraft({
+      name: dropDay.name,
+      targetDate: dropDay.targetDate,
+      description: dropDay.description,
+    });
+    setShowAddDropModal(true);
+  }
+
+  function closeDropDayModal() {
+    setEditingDropDayId(null);
+    setDropDraft(emptyDropDayDraft);
+    setShowAddDropModal(false);
+  }
+
+  async function handleSaveDropDay() {
+    if (!dropDraft.name || !dropDraft.targetDate) {
+      setError("Drop day name and target date are required.");
+      return;
+    }
+
+    if (!editingDropDayId) {
+      await handleAddDropDay();
+      return;
+    }
+
+    const existingDropDay = data.dropDays.find((item) => item.id === editingDropDayId);
+    if (!existingDropDay) {
+      setError("Could not find that drop day.");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    setMessage("");
+
+    const saveError = await saveDropDayRecord({
+      ...existingDropDay,
+      name: dropDraft.name,
+      targetDate: dropDraft.targetDate,
+      description: dropDraft.description,
+    });
+
+    if (saveError) {
+      setError(saveError);
+      setSaving(false);
+      return;
+    }
+
+    closeDropDayModal();
+    setSaving(false);
+    setMessage("Drop day updated.");
   }
 
   async function handleAddProduct() {
@@ -2379,7 +2441,7 @@ export function PipelineApp() {
                     </div>
                     <button
                       className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300"
-                      onClick={() => setShowAddDropModal(true)}
+                      onClick={openNewDropDayModal}
                     >
                       <Plus className="h-4 w-4" />
                       New drop day
@@ -2394,6 +2456,7 @@ export function PipelineApp() {
                     setScope(dropDayId);
                     setView("products");
                   }}
+                  onEditDrop={(dropDay) => openEditDropDayModal(dropDay)}
                   onToggleArchive={(dropDayId, archived) =>
                     void toggleDropArchive(dropDayId, archived)
                   }
@@ -2528,9 +2591,9 @@ export function PipelineApp() {
 
         {showAddDropModal ? (
           <ModalShell
-            title="Create Drop Day"
+            title={editingDropDayId ? "Edit Drop Day" : "Create Drop Day"}
             description="Use a drop when a group of products is planned for the same release window."
-            onClose={() => setShowAddDropModal(false)}
+            onClose={closeDropDayModal}
           >
             <div className="grid gap-3 md:grid-cols-2">
               <Input
@@ -2560,17 +2623,17 @@ export function PipelineApp() {
             <div className="mt-6 flex justify-end gap-3">
               <button
                 className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-                onClick={() => setShowAddDropModal(false)}
+                onClick={closeDropDayModal}
               >
                 Cancel
               </button>
               <button
                 className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-70"
-                onClick={() => void handleAddDropDay()}
+                onClick={() => void handleSaveDropDay()}
                 disabled={saving}
               >
                 <Plus className="h-4 w-4" />
-                Create drop day
+                {editingDropDayId ? "Save drop day" : "Create drop day"}
               </button>
             </div>
           </ModalShell>
@@ -3961,11 +4024,13 @@ function DropDayOverview({
   dropDays,
   products,
   onOpenDrop,
+  onEditDrop,
   onToggleArchive,
 }: {
   dropDays: DropDay[];
   products: ProductWithCosts[];
   onOpenDrop: (dropDayId: string) => void;
+  onEditDrop: (dropDay: DropDay) => void;
   onToggleArchive: (dropDayId: string, archived: boolean) => void;
 }) {
   return (
@@ -3999,12 +4064,20 @@ function DropDayOverview({
                   <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-600">
                     {formatDate(dropDay.targetDate)}
                   </span>
-                  <button
-                    className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
-                    onClick={() => onToggleArchive(dropDay.id, !dropDay.archived)}
-                  >
-                    {dropDay.archived ? "Restore" : "Archive"}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
+                      onClick={() => onEditDrop(dropDay)}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
+                      onClick={() => onToggleArchive(dropDay.id, !dropDay.archived)}
+                    >
+                      {dropDay.archived ? "Restore" : "Archive"}
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -4238,15 +4311,49 @@ function Input({
   onChange: (value: string) => void;
   type?: "text" | "date" | "number" | "email" | "password";
 }) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const isDateField = type === "date";
+
   return (
     <label className="block">
       <span className="mb-2 block text-sm text-slate-600">{label}</span>
-      <input
-        className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-emerald-400"
-        type={type}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      />
+      <div className="relative">
+        <input
+          ref={inputRef}
+          className={cn(
+            "w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-emerald-400",
+            isDateField && "pr-12",
+          )}
+          type={type}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
+        {isDateField ? (
+          <button
+            type="button"
+            className="absolute inset-y-1.5 right-1.5 inline-flex items-center justify-center rounded-xl border border-slate-200 bg-slate-50 px-3 text-slate-600 transition hover:bg-white"
+            onClick={() => {
+              const input = inputRef.current;
+              if (!input) {
+                return;
+              }
+
+              const pickerInput = input as HTMLInputElement & {
+                showPicker?: () => void;
+              };
+              input.focus();
+              if (pickerInput.showPicker) {
+                pickerInput.showPicker();
+              } else {
+                input.click();
+              }
+            }}
+            aria-label={`Choose ${label}`}
+          >
+            <CalendarDays className="h-4 w-4" />
+          </button>
+        ) : null}
+      </div>
     </label>
   );
 }
