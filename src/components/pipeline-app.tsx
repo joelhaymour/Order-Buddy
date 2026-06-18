@@ -19,7 +19,6 @@ import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
-  Clock3,
   Layers3,
   LogOut,
   Package2,
@@ -104,14 +103,6 @@ type CostEditorState = {
   id: string | null;
   draft: CostEntryDraft;
 };
-type ProductQuickFilter =
-  | "all"
-  | "bulk-ready-week"
-  | "arrivals-week"
-  | "missing-dates"
-  | "no-costs"
-  | "sample-review"
-  | "drop-risk";
 type PlanningAgendaItem = {
   id: string;
   productId: string;
@@ -119,13 +110,6 @@ type PlanningAgendaItem = {
   detail: string;
   date: string;
   status: "late" | "soon" | "planned";
-};
-type UpcomingMilestoneItem = {
-  id: string;
-  productId: string;
-  label: string;
-  date: string;
-  type: "bulk-ready" | "arrival";
 };
 
 type DropDayRow = {
@@ -549,7 +533,6 @@ export function PipelineApp() {
   });
   const [calendarViewMode, setCalendarViewMode] = useState<"month" | "agenda">("month");
   const [showArchivedDrops, setShowArchivedDrops] = useState(false);
-  const [productQuickFilter, setProductQuickFilter] = useState<ProductQuickFilter>("all");
 
   const productsWithCosts = useMemo(
     () => attachCosts(data.products, data.costEntries),
@@ -583,50 +566,6 @@ export function PipelineApp() {
     const normalizedSearch = productSearch.trim().toLowerCase();
 
     const nextProducts = filteredProducts
-      .filter((product) => {
-        switch (productQuickFilter) {
-          case "bulk-ready-week": {
-            const bulkReadyDate = getProductTimeline(product).bulkReadyDate;
-            const days = daysUntil(bulkReadyDate);
-            return days !== null && days >= 0 && days <= 7;
-          }
-          case "arrivals-week": {
-            const arrivalDate = getProductTimeline(product).arrivalDate;
-            const days = daysUntil(arrivalDate);
-            return days !== null && days >= 0 && days <= 7;
-          }
-          case "missing-dates":
-            return product.status === "sample"
-              ? !product.sampleOrderedAt ||
-                  !calculateSampleArrivalDate(
-                    product.sampleOrderedAt,
-                    product.sampleProductionDays,
-                    product.sampleShippingDays,
-                  )
-              : product.status === "bulk"
-                ? !product.bulkStartDate ||
-                  !calculateArrivalDate(
-                    product.bulkStartDate,
-                    product.productionDays,
-                    product.shippingDays,
-                  )
-                : false;
-          case "no-costs":
-            return product.costs.length === 0;
-          case "sample-review":
-            return product.status === "sample";
-          case "drop-risk": {
-            const timeline = getProductTimeline(product);
-            const finalDate =
-              timeline.arrivalDate ?? timeline.bulkReadyDate ?? timeline.sampleArrivalDate;
-            const targetDate = getAssignedDropDate(data.dropDays, product.dropDayId);
-            return Boolean(finalDate && targetDate && finalDate > targetDate);
-          }
-          case "all":
-          default:
-            return true;
-        }
-      })
       .filter((product) =>
         productStatusFilter === "all" ? true : product.status === productStatusFilter,
       )
@@ -670,145 +609,10 @@ export function PipelineApp() {
     data.dropDays,
     filteredProducts,
     productCategoryFilter,
-    productQuickFilter,
     productSearch,
     productSort,
     productStatusFilter,
   ]);
-
-  const actionCenterItems = useMemo(() => {
-    const bulkReadyWeek = filteredProducts.filter((product) => {
-      const bulkReadyDate = getProductTimeline(product).bulkReadyDate;
-      const countdown = daysUntil(bulkReadyDate);
-      return countdown !== null && countdown >= 0 && countdown <= 7;
-    });
-
-    const arrivalsWeek = filteredProducts.filter((product) => {
-      const arrivalDate = getProductTimeline(product).arrivalDate;
-      const countdown = daysUntil(arrivalDate);
-      return countdown !== null && countdown >= 0 && countdown <= 7;
-    });
-
-    const missingDates = filteredProducts.filter((product) => {
-      if (product.status === "sample") {
-        return !product.sampleOrderedAt || !calculateSampleArrivalDate(
-          product.sampleOrderedAt,
-          product.sampleProductionDays,
-          product.sampleShippingDays,
-        );
-      }
-
-      if (product.status === "bulk") {
-        return !product.bulkStartDate || !calculateArrivalDate(
-          product.bulkStartDate,
-          product.productionDays,
-          product.shippingDays,
-        );
-      }
-
-      return false;
-    });
-
-    const noCosts = filteredProducts.filter((product) => product.costs.length === 0);
-    const needsReview = filteredProducts.filter((product) => product.status === "sample");
-    const dropAtRisk = filteredProducts.filter((product) => {
-      const timeline = getProductTimeline(product);
-      const finalDate =
-        timeline.arrivalDate ?? timeline.bulkReadyDate ?? timeline.sampleArrivalDate;
-      const targetDate = getAssignedDropDate(data.dropDays, product.dropDayId);
-      if (!finalDate || !targetDate) {
-        return false;
-      }
-      return finalDate > targetDate;
-    });
-
-    return [
-      {
-        id: "bulk-ready-week",
-        label: "Bulk ready this week",
-        count: bulkReadyWeek.length,
-        description: "Bulk runs completing in the next 7 days.",
-        accent: "text-amber-100",
-        tone: "border-amber-400/20 bg-amber-400/10",
-        filter: "bulk-ready-week" as const,
-      },
-      {
-        id: "arrivals-week",
-        label: "Arrivals this week",
-        count: arrivalsWeek.length,
-        description: "Products expected to arrive in the next 7 days.",
-        accent: "text-sky-100",
-        tone: "border-sky-400/20 bg-sky-400/10",
-        filter: "arrivals-week" as const,
-      },
-      {
-        id: "missing-dates",
-        label: "Missing dates",
-        count: missingDates.length,
-        description: "Items missing the dates needed to forecast timeline.",
-        accent: "text-sky-100",
-        tone: "border-sky-400/20 bg-sky-400/10",
-        filter: "missing-dates" as const,
-      },
-      {
-        id: "no-costs",
-        label: "No costs entered",
-        count: noCosts.length,
-        description: "Products without any expense tracking yet.",
-        accent: "text-emerald-100",
-        tone: "border-emerald-400/20 bg-emerald-400/10",
-        filter: "no-costs" as const,
-      },
-      {
-        id: "sample-review",
-        label: "Needs sample review",
-        count: needsReview.length,
-        description: "Samples that still need approval or feedback.",
-        accent: "text-cyan-100",
-        tone: "border-cyan-400/20 bg-cyan-400/10",
-        filter: "sample-review" as const,
-      },
-      {
-        id: "drop-risk",
-        label: "Drop at risk",
-        count: dropAtRisk.length,
-        description: "Products forecasted after their target drop date.",
-        accent: "text-fuchsia-100",
-        tone: "border-fuchsia-400/20 bg-fuchsia-400/10",
-        filter: "drop-risk" as const,
-      },
-    ];
-  }, [data.dropDays, filteredProducts]);
-
-  const upcomingMilestones = useMemo(() => {
-    const items: UpcomingMilestoneItem[] = [];
-
-    for (const product of filteredProducts) {
-      const timeline = getProductTimeline(product);
-
-      if (timeline.bulkReadyDate) {
-        items.push({
-          id: `${product.id}-bulk-ready`,
-          productId: product.id,
-          label: `${product.name} bulk ready`,
-          date: timeline.bulkReadyDate,
-          type: "bulk-ready",
-        });
-      }
-
-      if (timeline.arrivalDate) {
-        items.push({
-          id: `${product.id}-arrival`,
-          productId: product.id,
-          label: `${product.name} arrival`,
-          date: timeline.arrivalDate,
-          type: "arrival",
-        });
-      }
-    }
-
-    return items.sort((left, right) => left.date.localeCompare(right.date)).slice(0, 8);
-  }, [filteredProducts]);
 
   const dashboardAgenda = useMemo(() => {
     return filteredProducts
@@ -956,7 +760,6 @@ export function PipelineApp() {
     setProductStatusFilter("all");
     setProductCategoryFilter("all");
     setProductSort("next-action");
-    setProductQuickFilter("all");
   }
 
   function saveCurrentFilter() {
@@ -983,11 +786,17 @@ export function PipelineApp() {
     setProductStatusFilter(filter.status);
     setProductCategoryFilter(filter.category);
     setProductSort(filter.sort);
-    setProductQuickFilter("all");
   }
 
-  function openActionFilter(filter: ProductQuickFilter) {
-    setProductQuickFilter(filter);
+  function openProductsShortcut(options: {
+    status?: ProductStatusFilter;
+    sort?: ProductSort;
+    search?: string;
+  }) {
+    setProductSearch(options.search ?? "");
+    setProductStatusFilter(options.status ?? "all");
+    setProductCategoryFilter("all");
+    setProductSort(options.sort ?? "next-action");
     setView("products");
     setProductLayout("list");
   }
@@ -1909,6 +1718,11 @@ export function PipelineApp() {
       .sort((left, right) => left.date.localeCompare(right.date));
   }, [filteredProducts, scope, visibleDropDays]);
 
+  const dashboardCalendarAgenda = useMemo(() => {
+    const upcomingItems = calendarItems.filter((item) => (daysUntil(item.date) ?? 999) >= 0);
+    return (upcomingItems.length ? upcomingItems : calendarItems).slice(0, 8);
+  }, [calendarItems]);
+
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-100">
@@ -2115,15 +1929,34 @@ export function PipelineApp() {
               <DashboardView
                 scopeLabel={getScopeLabel(scope, data.dropDays)}
                 filteredProducts={filteredProducts}
-                upcomingMilestones={upcomingMilestones}
-                actionCenterItems={actionCenterItems}
                 dashboardAgenda={dashboardAgenda}
-                onOpenActionFilter={openActionFilter}
+                calendarAgendaItems={dashboardCalendarAgenda}
+                onOpenStatCard={(kind) => {
+                  if (kind === "ideas") {
+                    openProductsShortcut({ status: "idea" });
+                    return;
+                  }
+
+                  if (kind === "samples") {
+                    openProductsShortcut({ status: "sample" });
+                    return;
+                  }
+
+                  if (kind === "bulk") {
+                    openProductsShortcut({ status: "bulk" });
+                    return;
+                  }
+
+                  openProductsShortcut({ sort: "cost-high" });
+                }}
                 onOpenAgendaProduct={(productId) => {
                   const product = productsWithCosts.find((item) => item.id === productId);
                   if (product) {
                     openProduct(product);
                   }
+                }}
+                onOpenCalendarItem={(item) => {
+                  void handleCalendarEventOpen(item);
                 }}
               />
             ) : null}
@@ -2266,21 +2099,6 @@ export function PipelineApp() {
                           {filter.name}
                         </button>
                       ))}
-                    </div>
-                  ) : null}
-                  {productQuickFilter !== "all" ? (
-                    <div className="mt-4 flex items-center gap-3 rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-50">
-                      <span>
-                        Dashboard quick filter active:{" "}
-                        {actionCenterItems.find((item) => item.filter === productQuickFilter)?.label ??
-                          productQuickFilter}
-                      </span>
-                      <button
-                        className="rounded-xl border border-cyan-300/20 bg-cyan-400/10 px-3 py-2 text-xs font-medium text-cyan-50 transition hover:bg-cyan-400/20"
-                        onClick={() => setProductQuickFilter("all")}
-                      >
-                        Clear
-                      </button>
                     </div>
                   ) : null}
                 </Card>
@@ -2561,36 +2379,24 @@ export function PipelineApp() {
 function DashboardView({
   scopeLabel,
   filteredProducts,
-  upcomingMilestones,
-  actionCenterItems,
   dashboardAgenda,
-  onOpenActionFilter,
+  calendarAgendaItems,
+  onOpenStatCard,
   onOpenAgendaProduct,
+  onOpenCalendarItem,
 }: {
   scopeLabel: string;
   filteredProducts: ProductWithCosts[];
-  upcomingMilestones: UpcomingMilestoneItem[];
-  actionCenterItems: {
-    id: string;
-    label: string;
-    count: number;
-    description: string;
-    accent: string;
-    tone: string;
-    filter: ProductQuickFilter;
-  }[];
   dashboardAgenda: PlanningAgendaItem[];
-  onOpenActionFilter: (filter: ProductQuickFilter) => void;
+  calendarAgendaItems: CalendarItem[];
+  onOpenStatCard: (kind: "ideas" | "samples" | "bulk" | "cost") => void;
   onOpenAgendaProduct: (productId: string) => void;
+  onOpenCalendarItem: (item: CalendarItem) => void;
 }) {
   const totalTrackedCost = filteredProducts.reduce(
     (sum, product) => sum + getProductTotalCost(product),
     0,
   );
-  const [showAllActionCards, setShowAllActionCards] = useState(false);
-  const visibleActionCenterItems = showAllActionCards
-    ? actionCenterItems
-    : actionCenterItems.filter((item) => item.count > 0);
 
   return (
     <>
@@ -2600,65 +2406,37 @@ function DashboardView({
           value={String(filteredProducts.filter((product) => product.status === "idea").length)}
           description={scopeLabel}
           icon={Layers3}
+          onClick={() => onOpenStatCard("ideas")}
         />
         <StatCard
           label="Samples"
           value={String(filteredProducts.filter((product) => product.status === "sample").length)}
           description="Awaiting review or approval"
           icon={Target}
+          onClick={() => onOpenStatCard("samples")}
         />
         <StatCard
           label="Bulk"
           value={String(filteredProducts.filter((product) => product.status === "bulk").length)}
           description="Approved for production"
           icon={Truck}
+          onClick={() => onOpenStatCard("bulk")}
         />
         <StatCard
           label="Tracked cost"
           value={currency(totalTrackedCost)}
           description="Across selected scope"
           icon={Receipt}
+          onClick={() => onOpenStatCard("cost")}
         />
       </div>
 
       <div className="grid gap-6 xl:grid-cols-2">
-        <Card title="Action Center">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <p className="text-sm text-slate-400">
-              Current-state alerts. Planning deadlines live below in the agenda.
-            </p>
-            {actionCenterItems.some((item) => item.count === 0) ? (
-              <button
-                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-white transition hover:bg-white/10"
-                onClick={() => setShowAllActionCards((current) => !current)}
-              >
-                {showAllActionCards ? "Hide zero cards" : "Show all"}
-              </button>
-            ) : null}
-          </div>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {(visibleActionCenterItems.length ? visibleActionCenterItems : actionCenterItems).map(
-              (item) => (
-              <button
-                key={item.id}
-                className={cn(
-                  "rounded-2xl border p-4 text-left transition hover:brightness-110",
-                  item.tone,
-                )}
-                onClick={() => onOpenActionFilter(item.filter)}
-              >
-                <p className="text-xs uppercase tracking-[0.16em] text-slate-300">{item.label}</p>
-                <p className={cn("mt-2 text-2xl font-semibold", item.accent)}>{item.count}</p>
-                <p className="mt-2 text-sm text-slate-300">{item.description}</p>
-              </button>
-              ),
-            )}
-          </div>
-        </Card>
-      </div>
-
-      <div className="grid gap-6 xl:grid-cols-2">
         <Card title="Planning Agenda">
+          <p className="mb-4 text-sm text-slate-400">
+            Backward-plan what needs to happen next so each product can still make its assigned
+            drop.
+          </p>
           <div className="space-y-3">
             {dashboardAgenda.length ? (
               dashboardAgenda.map((item) => (
@@ -2695,22 +2473,40 @@ function DashboardView({
           </div>
         </Card>
 
-        <Card title="Upcoming Milestones">
+        <Card title="Calendar Agenda">
+          <p className="mb-4 text-sm text-slate-400">
+            Next scheduled sample arrivals, bulk-ready dates, arrivals, and drop days in calendar
+            order.
+          </p>
           <div className="space-y-3">
-            {upcomingMilestones.length ? (
-              upcomingMilestones.map((item) => (
-                <TimelineRow
+            {calendarAgendaItems.length ? (
+              calendarAgendaItems.map((item) => (
+                <button
                   key={item.id}
-                  title={item.label}
-                  subtitle={item.type === "arrival" ? "Arrival milestone" : "Bulk ready milestone"}
-                  date={item.date}
-                  icon={item.type === "arrival" ? Truck : Clock3}
-                />
+                  className={cn(
+                    "flex w-full items-center justify-between gap-4 rounded-2xl border p-4 text-left transition hover:brightness-110",
+                    getCalendarEventClasses(item.type),
+                  )}
+                  onClick={() => onOpenCalendarItem(item)}
+                >
+                  <div>
+                    <p className="font-medium">{item.label}</p>
+                    <p className="mt-1 text-sm opacity-80">{formatDate(item.date)}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xs uppercase tracking-[0.16em] opacity-70">
+                      {item.type === "drop-day" ? "Drop day" : item.type.replace("-", " ")}
+                    </p>
+                    <p className="mt-1 text-sm font-medium">
+                      {daysUntil(item.date) === null ? "" : `${daysUntil(item.date)} days`}
+                    </p>
+                  </div>
+                </button>
               ))
             ) : (
               <EmptyState
-                title="No milestones yet"
-                description="Once you add production and shipping business-day lead times, upcoming milestones will show here."
+                title="Nothing on the calendar yet"
+                description="Once products have sample, bulk, arrival, or drop dates, the calendar agenda will show them here."
               />
             )}
           </div>
@@ -3976,49 +3772,43 @@ function TimelineSummary({ product }: { product: Product }) {
   );
 }
 
-function TimelineRow({
-  title,
-  subtitle,
-  date,
-  icon: Icon,
-}: {
-  title: string;
-  subtitle: string;
-  date: string | null;
-  icon: typeof Clock3;
-}) {
-  return (
-    <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-slate-900/70 p-4">
-      <div className="rounded-2xl bg-white/5 p-3">
-        <Icon className="h-4 w-4 text-emerald-200" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="font-medium text-white">{title}</p>
-        <p className="truncate text-sm text-slate-400">{subtitle}</p>
-      </div>
-      <div className="text-right">
-        <p className="font-medium text-white">{formatDate(date)}</p>
-        <p className="text-xs text-slate-500">
-          {daysUntil(date) === null ? "" : `${daysUntil(date)} days`}
-        </p>
-      </div>
-    </div>
-  );
-}
-
 function StatCard({
   label,
   value,
   description,
   icon: Icon,
+  onClick,
 }: {
   label: string;
   value: string;
   description: string;
   icon: typeof Layers3;
+  onClick?: () => void;
 }) {
+  const className = cn(
+    "rounded-[28px] border border-white/10 bg-white/5 p-5 text-left",
+    onClick && "transition hover:bg-white/[0.08] hover:border-white/15",
+  );
+
+  if (onClick) {
+    return (
+      <button className={className} onClick={onClick}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">{label}</p>
+            <p className="mt-3 text-3xl font-semibold text-white">{value}</p>
+            <p className="mt-2 text-sm text-slate-400">{description}</p>
+          </div>
+          <div className="rounded-2xl border border-white/10 bg-slate-900/70 p-3">
+            <Icon className="h-5 w-5 text-emerald-200" />
+          </div>
+        </div>
+      </button>
+    );
+  }
+
   return (
-    <div className="rounded-[28px] border border-white/10 bg-white/5 p-5">
+    <div className={className}>
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs uppercase tracking-[0.2em] text-slate-400">{label}</p>
