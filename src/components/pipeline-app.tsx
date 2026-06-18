@@ -399,14 +399,14 @@ function getProductNextAction(product: Product) {
 function getPriorityBadgeClasses(priority: ProductPriority) {
   switch (priority) {
     case "urgent":
-      return "border-rose-400/30 bg-rose-400/10 text-rose-100";
+      return "border-rose-200 bg-rose-50 text-rose-700";
     case "high":
-      return "border-amber-400/30 bg-amber-400/10 text-amber-100";
+      return "border-amber-200 bg-amber-50 text-amber-700";
     case "medium":
-      return "border-sky-400/30 bg-sky-400/10 text-sky-100";
+      return "border-sky-200 bg-sky-50 text-sky-700";
     case "low":
     default:
-      return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
+      return "border-emerald-200 bg-emerald-50 text-emerald-700";
   }
 }
 
@@ -415,18 +415,18 @@ function getUrgencyTone(product: Product, dropDays: DropDay[]) {
   const days = daysUntil(referenceDate);
 
   if (days === null) {
-    return "border-white/5";
+    return "border-slate-200";
   }
 
   if (days < 0) {
-    return "border-l-2 border-l-rose-400/80 bg-rose-400/[0.04]";
+    return "border-l-2 border-l-rose-400 bg-rose-50";
   }
 
   if (days <= 5) {
-    return "border-l-2 border-l-amber-400/80 bg-amber-400/[0.04]";
+    return "border-l-2 border-l-amber-400 bg-amber-50";
   }
 
-  return "border-l-2 border-l-cyan-400/60";
+  return "border-l-2 border-l-cyan-400 bg-cyan-50/60";
 }
 
 function buildActivityEntry(message: string, user: string): ActivityEntry {
@@ -450,34 +450,34 @@ function getProductSortDate(product: Product, dropDays: DropDay[]) {
 function getStatusBadgeClasses(status: ProductStatus) {
   switch (status) {
     case "idea":
-      return "border-violet-400/30 bg-violet-400/10 text-violet-100";
+      return "border-violet-200 bg-violet-50 text-violet-700";
     case "sample":
-      return "border-cyan-400/30 bg-cyan-400/10 text-cyan-100";
+      return "border-cyan-200 bg-cyan-50 text-cyan-700";
     case "bulk":
-      return "border-amber-400/30 bg-amber-400/10 text-amber-100";
+      return "border-amber-200 bg-amber-50 text-amber-700";
     case "canceled":
-      return "border-rose-400/30 bg-rose-400/10 text-rose-100";
+      return "border-rose-200 bg-rose-50 text-rose-700";
     default:
-      return "border-white/10 bg-white/5 text-slate-200";
+      return "border-slate-200 bg-white text-slate-700";
   }
 }
 
 function getCalendarEventClasses(type: CalendarItemType) {
   switch (type) {
     case "sample":
-      return "border-cyan-400/35 bg-cyan-400/20 text-cyan-50";
+      return "border-cyan-200 bg-cyan-50 text-cyan-700";
     case "drop":
-      return "border-fuchsia-400/40 bg-fuchsia-400/20 text-fuchsia-50";
+      return "border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700";
     case "bulk":
-      return "border-amber-400/40 bg-amber-400/20 text-amber-50";
+      return "border-amber-200 bg-amber-50 text-amber-700";
     case "arrival":
-      return "border-sky-400/40 bg-sky-400/20 text-sky-50";
+      return "border-sky-200 bg-sky-50 text-sky-700";
     case "drop-day":
-      return "border-emerald-400/40 bg-emerald-400/20 text-emerald-50";
+      return "border-emerald-200 bg-emerald-50 text-emerald-700";
     case "custom":
-      return "border-violet-400/40 bg-violet-400/20 text-violet-50";
+      return "border-violet-200 bg-violet-50 text-violet-700";
     default:
-      return "border-white/10 bg-white/5 text-slate-100";
+      return "border-slate-200 bg-white text-slate-700";
   }
 }
 
@@ -1493,7 +1493,48 @@ export function PipelineApp() {
   }
 
   async function handleCalendarEventDrop(item: CalendarItem, targetDate: string) {
-    if (!item.productId || !item.draggable) {
+    if (!item.draggable) {
+      return;
+    }
+
+    if (item.kind === "custom-event" && item.dropDayId) {
+      const dropDay = data.dropDays.find((entry) => entry.id === item.dropDayId);
+      if (!dropDay) {
+        return;
+      }
+
+      const customEvent = dropDay.customEvents.find((entry) => entry.id === item.id);
+      if (!customEvent) {
+        return;
+      }
+
+      setSaving(true);
+      setError("");
+      setMessage("");
+
+      const saveError = await saveDropDayRecord({
+        ...dropDay,
+        customEvents: dropDay.customEvents
+          .map((entry) => (entry.id === item.id ? { ...entry, date: targetDate } : entry))
+          .sort((left, right) => left.date.localeCompare(right.date)),
+      });
+
+      if (saveError) {
+        setError(saveError);
+        setSaving(false);
+        return;
+      }
+
+      if (calendarEventDraft.id === item.id) {
+        setCalendarEventDraft((current) => ({ ...current, date: targetDate }));
+      }
+
+      setSaving(false);
+      setMessage(`${customEvent.title} moved to ${formatDate(targetDate)}.`);
+      return;
+    }
+
+    if (!item.productId) {
       return;
     }
 
@@ -1896,7 +1937,7 @@ export function PipelineApp() {
           type: "custom" as const,
           kind: "custom-event" as const,
           productId: null,
-          draggable: false,
+          draggable: true,
           dropDayId: dropDay.id,
           notes: event.notes,
         })),
@@ -1914,8 +1955,8 @@ export function PipelineApp() {
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-100">
-        <div className="rounded-3xl border border-white/10 bg-white/5 px-6 py-5">
+      <div className="flex min-h-screen items-center justify-center bg-stone-100 text-slate-900">
+        <div className="rounded-3xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
           Loading your product pipeline...
         </div>
       </div>
@@ -1924,14 +1965,14 @@ export function PipelineApp() {
 
   if (authMode === "supabase" && !isAuthenticated) {
     return (
-      <div className="min-h-screen bg-slate-950 px-4 py-12 text-slate-100">
-        <div className="mx-auto max-w-md rounded-[28px] border border-white/10 bg-white/5 p-8 shadow-2xl shadow-black/20">
+      <div className="min-h-screen bg-stone-100 px-4 py-12 text-slate-900">
+        <div className="mx-auto max-w-md rounded-[28px] border border-slate-200 bg-white p-8 shadow-sm">
           <div className="mb-8 space-y-3">
-            <span className="inline-flex rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 py-1 text-xs font-medium text-emerald-200">
+            <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
               Private internal app
             </span>
             <h1 className="text-3xl font-semibold tracking-tight">Order Buddy</h1>
-            <p className="text-sm text-slate-300">
+            <p className="text-sm text-slate-600">
               Sign in with your Supabase email and password to manage products, costs,
               and drop days with your business partner.
             </p>
@@ -1939,9 +1980,9 @@ export function PipelineApp() {
 
           <div className="space-y-4">
             <label className="block">
-              <span className="mb-2 block text-sm text-slate-300">Email</span>
+              <span className="mb-2 block text-sm text-slate-600">Email</span>
               <input
-                className="w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none ring-0 transition focus:border-emerald-400"
+                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none ring-0 transition focus:border-emerald-400"
                 type="email"
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
@@ -1949,9 +1990,9 @@ export function PipelineApp() {
               />
             </label>
             <label className="block">
-              <span className="mb-2 block text-sm text-slate-300">Password</span>
+              <span className="mb-2 block text-sm text-slate-600">Password</span>
               <input
-                className="w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none transition focus:border-emerald-400"
+                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none transition focus:border-emerald-400"
                 type="password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
@@ -1965,7 +2006,7 @@ export function PipelineApp() {
               </p>
             ) : null}
             {message ? (
-              <p className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+              <p className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
                 {message}
               </p>
             ) : null}
@@ -1979,7 +2020,7 @@ export function PipelineApp() {
                 Sign in
               </button>
               <button
-                className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 font-medium text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-70"
+                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-70"
                 onClick={() => void handleLogin("sign-up")}
                 disabled={saving}
               >
@@ -1993,21 +2034,21 @@ export function PipelineApp() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen bg-stone-100 text-slate-900">
       <div className="mx-auto max-w-[1600px] px-4 py-5 lg:px-6">
-        <header className="mb-6 rounded-[28px] border border-white/10 bg-gradient-to-br from-slate-900 via-slate-950 to-slate-900 p-6 shadow-2xl shadow-black/20">
+        <header className="mb-6 rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <div className="mb-2 flex flex-wrap items-center gap-2">
-                <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-slate-200">
+                <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700">
                   {authMode === "demo" ? "Demo mode" : "Shared live workspace"}
                 </span>
-                <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-medium text-emerald-200">
+                <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
                   {activeUserEmail}
                 </span>
               </div>
               <h1 className="text-3xl font-semibold tracking-tight">Order Buddy</h1>
-              <p className="mt-2 max-w-3xl text-sm text-slate-300">
+              <p className="mt-2 max-w-3xl text-sm text-slate-600">
                 Track golf apparel ideas, samples, production, arrival windows, and total
                 product costs in one shared workflow.
               </p>
@@ -2016,7 +2057,7 @@ export function PipelineApp() {
             <div className="flex flex-wrap gap-3">
               {authMode === "supabase" ? (
                 <button
-                  className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                  className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
                   onClick={() => void handleSignOut()}
                 >
                   <LogOut className="h-4 w-4" />
@@ -2029,8 +2070,8 @@ export function PipelineApp() {
 
         <div className="grid gap-6 xl:grid-cols-[250px_minmax(0,1fr)]">
           <aside className="space-y-4">
-            <section className="rounded-[28px] border border-white/10 bg-white/5 p-4">
-              <p className="mb-3 text-sm font-medium text-slate-300">Views</p>
+            <section className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm">
+              <p className="mb-3 text-sm font-medium text-slate-700">Views</p>
               <div className="space-y-2">
                 {navItems.map((item) => {
                   const Icon = item.icon;
@@ -2041,7 +2082,7 @@ export function PipelineApp() {
                         "flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-left text-sm transition",
                         view === item.id
                           ? "bg-emerald-400 text-slate-950"
-                          : "bg-slate-900/70 text-slate-200 hover:bg-white/10",
+                          : "bg-slate-50 text-slate-700 hover:bg-slate-100",
                       )}
                       onClick={() => setView(item.id)}
                     >
@@ -2053,11 +2094,11 @@ export function PipelineApp() {
               </div>
             </section>
 
-            <section className="rounded-[28px] border border-white/10 bg-white/5 p-4">
+            <section className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-3 flex items-center justify-between gap-3">
-                <p className="text-sm font-medium text-slate-300">Product scope</p>
+                <p className="text-sm font-medium text-slate-700">Product scope</p>
                 <button
-                  className="text-xs uppercase tracking-[0.16em] text-slate-400 transition hover:text-white"
+                  className="text-xs uppercase tracking-[0.16em] text-slate-500 transition hover:text-slate-900"
                   onClick={() => setShowArchivedDrops((current) => !current)}
                 >
                   {showArchivedDrops ? "Hide archived" : "Show archived"}
@@ -2069,7 +2110,7 @@ export function PipelineApp() {
                     "w-full rounded-2xl px-4 py-3 text-left text-sm transition",
                     scope === "all"
                       ? "bg-emerald-400 text-slate-950"
-                      : "bg-slate-900/70 text-slate-200 hover:bg-white/10",
+                      : "bg-slate-50 text-slate-700 hover:bg-slate-100",
                   )}
                   onClick={() => setScope("all")}
                 >
@@ -2082,7 +2123,7 @@ export function PipelineApp() {
                       "w-full rounded-2xl px-4 py-3 text-left text-sm transition",
                       scope === dropDay.id
                         ? "bg-emerald-400 text-slate-950"
-                        : "bg-slate-900/70 text-slate-200 hover:bg-white/10",
+                        : "bg-slate-50 text-slate-700 hover:bg-slate-100",
                     )}
                     onClick={() => {
                       setScope(dropDay.id);
@@ -2092,7 +2133,7 @@ export function PipelineApp() {
                     <div className="flex items-center justify-between gap-3">
                       <div className="font-medium">{dropDay.name}</div>
                       {dropDay.archived ? (
-                        <span className="rounded-full border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.16em]">
+                        <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-600">
                           Archived
                         </span>
                       ) : null}
@@ -2155,18 +2196,18 @@ export function PipelineApp() {
                 <Card title="Products">
                   <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                     <div className="space-y-3">
-                      <p className="max-w-3xl text-sm text-slate-300">
+                      <p className="max-w-3xl text-sm text-slate-600">
                         Keep this page focused on finding, sorting, and acting on products. Open a
                         product only when you need to edit details, and use the filters to narrow
                         the list for new team members.
                       </p>
                       <div className="flex flex-wrap gap-3 text-sm">
-                        <div className="rounded-2xl border border-white/10 bg-slate-900/60 px-4 py-3 text-slate-300">
-                          <span className="font-medium text-white">{visibleProducts.length}</span>{" "}
+                        <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-slate-600">
+                          <span className="font-medium text-slate-900">{visibleProducts.length}</span>{" "}
                           visible in {getScopeLabel(scope, data.dropDays)}
                         </div>
-                        <div className="rounded-2xl border border-white/10 bg-slate-900/60 px-4 py-3 text-slate-300">
-                          <span className="font-medium text-white">Workflow:</span>{" "}
+                        <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-slate-600">
+                          <span className="font-medium text-slate-900">Workflow:</span>{" "}
                           {"Create product -> sample -> review -> bulk -> arrival"}
                         </div>
                       </div>
@@ -2174,7 +2215,7 @@ export function PipelineApp() {
                     <div className="flex flex-wrap gap-3">
                       {selectedProduct ? (
                         <button
-                          className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                          className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
                           onClick={() => setShowProductDrawer(true)}
                         >
                           Open selected product
@@ -2240,24 +2281,24 @@ export function PipelineApp() {
 
                     <div className="flex flex-wrap items-center justify-end gap-3">
                       <button
-                        className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                        className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
                         onClick={saveCurrentFilter}
                       >
                         Save filter
                       </button>
                       <button
-                        className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                        className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
                         onClick={resetProductFilters}
                       >
                         Reset
                       </button>
-                      <div className="inline-flex rounded-2xl border border-white/10 bg-slate-900/70 p-1">
+                      <div className="inline-flex rounded-2xl border border-slate-200 bg-slate-50 p-1">
                         <button
                           className={cn(
                             "rounded-xl px-4 py-2 text-sm font-medium transition",
                             productLayout === "board"
                               ? "bg-emerald-400 text-slate-950"
-                              : "text-slate-300 hover:bg-white/5",
+                              : "text-slate-600 hover:bg-white",
                           )}
                           onClick={() => setProductLayout("board")}
                         >
@@ -2268,7 +2309,7 @@ export function PipelineApp() {
                             "rounded-xl px-4 py-2 text-sm font-medium transition",
                             productLayout === "list"
                               ? "bg-emerald-400 text-slate-950"
-                              : "text-slate-300 hover:bg-white/5",
+                              : "text-slate-600 hover:bg-white",
                           )}
                           onClick={() => setProductLayout("list")}
                         >
@@ -2282,7 +2323,7 @@ export function PipelineApp() {
                       {savedFilters.map((filter) => (
                         <button
                           key={filter.id}
-                          className="rounded-full border border-white/10 bg-slate-900/70 px-3 py-2 text-xs font-medium text-slate-200 transition hover:bg-white/10"
+                          className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
                           onClick={() => applySavedFilter(filter)}
                         >
                           {filter.name}
@@ -2331,7 +2372,7 @@ export function PipelineApp() {
                 <Card title="Drops">
                   <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                     <div className="space-y-3">
-                      <p className="max-w-3xl text-sm text-slate-300">
+                      <p className="max-w-3xl text-sm text-slate-600">
                         Keep drops simple: create the date, give the release a clear name, then
                         assign products into that drop from the products page.
                       </p>
@@ -2468,7 +2509,7 @@ export function PipelineApp() {
             </div>
             <div className="mt-6 flex justify-end gap-3">
               <button
-                className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
                 onClick={() => setShowAddProductModal(false)}
               >
                 Cancel
@@ -2518,7 +2559,7 @@ export function PipelineApp() {
             </div>
             <div className="mt-6 flex justify-end gap-3">
               <button
-                className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
                 onClick={() => setShowAddDropModal(false)}
               >
                 Cancel
@@ -2588,7 +2629,7 @@ export function PipelineApp() {
               <div>
                 {calendarEventDraft.id ? (
                   <button
-                    className="rounded-2xl border border-rose-400/30 bg-rose-400/10 px-4 py-3 text-sm font-medium text-rose-100 transition hover:bg-rose-400/20 disabled:cursor-not-allowed disabled:opacity-70"
+                    className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-70"
                     onClick={() => void handleDeleteCalendarEvent()}
                     disabled={saving}
                   >
@@ -2598,7 +2639,7 @@ export function PipelineApp() {
               </div>
               <div className="flex gap-3">
                 <button
-                  className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                  className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
                   onClick={() => {
                     setShowCalendarEventModal(false);
                     setCalendarEventDraft(emptyCalendarEventDraft);
@@ -2717,21 +2758,21 @@ function DashboardView({
                 <button
                   key={item.id}
                   className={cn(
-                    "flex w-full items-start justify-between gap-4 rounded-2xl border p-4 text-left transition hover:bg-white/[0.04]",
+                    "flex w-full items-start justify-between gap-4 rounded-2xl border p-4 text-left transition hover:bg-white",
                     item.status === "late"
                       ? "border-rose-400/25 bg-rose-400/10"
                       : item.status === "soon"
                         ? "border-amber-400/25 bg-amber-400/10"
-                        : "border-white/10 bg-slate-900/70",
+                        : "border-slate-200 bg-slate-50",
                   )}
                   onClick={() => onOpenAgendaProduct(item.productId)}
                 >
                   <div>
-                    <p className="font-medium text-white">{item.title}</p>
-                    <p className="mt-1 text-sm text-slate-300">{item.detail}</p>
+                    <p className="font-medium text-slate-900">{item.title}</p>
+                    <p className="mt-1 text-sm text-slate-600">{item.detail}</p>
                   </div>
                   <div className="text-right">
-                    <p className="font-medium text-white">{formatDate(item.date)}</p>
+                    <p className="font-medium text-slate-900">{formatDate(item.date)}</p>
                     <p className="mt-1 text-xs text-slate-400">
                       {daysUntil(item.date) === null ? "" : `${daysUntil(item.date)} days`}
                     </p>
@@ -2802,15 +2843,15 @@ function ModalShell({
   onClose: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm">
-      <div className="max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-[32px] border border-white/10 bg-slate-950 shadow-2xl shadow-black/40">
-        <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-white/10 bg-slate-950/95 px-6 py-5 backdrop-blur">
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/15 p-4 backdrop-blur-sm">
+      <div className="max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-[32px] border border-slate-200 bg-white shadow-xl shadow-slate-200/70">
+        <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-slate-200 bg-white/95 px-6 py-5 backdrop-blur">
           <div>
-            <h2 className="text-xl font-semibold text-white">{title}</h2>
-            <p className="mt-2 max-w-2xl text-sm text-slate-400">{description}</p>
+            <h2 className="text-xl font-semibold text-slate-900">{title}</h2>
+            <p className="mt-2 max-w-2xl text-sm text-slate-600">{description}</p>
           </div>
           <button
-            className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-white transition hover:bg-white/10"
+            className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
             onClick={onClose}
           >
             Close
@@ -2872,10 +2913,10 @@ function ProductDrawer({
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 bg-slate-900/15 backdrop-blur-sm">
       <button className="absolute inset-0 cursor-default" onClick={onClose} aria-label="Close" />
-      <div className="absolute inset-y-0 right-0 w-full max-w-[760px] overflow-y-auto border-l border-white/10 bg-slate-950 shadow-2xl shadow-black/50">
-        <div className="sticky top-0 z-10 border-b border-white/10 bg-slate-950/95 px-5 py-4 backdrop-blur">
+      <div className="absolute inset-y-0 right-0 w-full max-w-[760px] overflow-y-auto border-l border-slate-200 bg-stone-100 shadow-2xl shadow-slate-300/60">
+        <div className="sticky top-0 z-10 border-b border-slate-200 bg-white/95 px-5 py-4 backdrop-blur">
           <div className="flex items-start justify-between gap-4">
             <div className="flex items-start gap-4">
               <ProductImagePreview
@@ -2887,15 +2928,15 @@ function ProductDrawer({
                 <p className="text-xs uppercase tracking-[0.18em] text-slate-500">
                   {getStatusLabel(productEditor.status)}
                 </p>
-                <h2 className="mt-1 text-2xl font-semibold text-white">{productEditor.name}</h2>
-                <p className="mt-2 text-sm text-slate-400">
+                <h2 className="mt-1 text-2xl font-semibold text-slate-900">{productEditor.name}</h2>
+                <p className="mt-2 text-sm text-slate-600">
                   {getDropDayName(dropDays, productEditor.dropDayId)} · Next action:{" "}
                   {getProductNextAction(productEditor)}
                 </p>
               </div>
             </div>
             <button
-              className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-white transition hover:bg-white/10"
+              className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
               onClick={onClose}
             >
               Close
@@ -2904,7 +2945,7 @@ function ProductDrawer({
         </div>
 
         <div className="space-y-5 p-5">
-          <div className="inline-flex rounded-2xl border border-white/10 bg-slate-900/70 p-1">
+          <div className="inline-flex rounded-2xl border border-slate-200 bg-slate-50 p-1">
             {(["overview", "timeline", "costs", "activity"] as DrawerTab[]).map((tab) => (
               <button
                 key={tab}
@@ -2912,7 +2953,7 @@ function ProductDrawer({
                   "rounded-xl px-4 py-2 text-sm font-medium capitalize transition",
                   drawerTab === tab
                     ? "bg-emerald-400 text-slate-950"
-                    : "text-slate-300 hover:bg-white/5",
+                    : "text-slate-600 hover:bg-white",
                 )}
                 onClick={() => setDrawerTab(tab)}
               >
@@ -2930,18 +2971,18 @@ function ProductDrawer({
                     productName={productEditor.name}
                     variant="detail"
                   />
-                  <div className="space-y-3 rounded-3xl border border-white/10 bg-slate-900/50 p-4">
+                  <div className="space-y-3 rounded-3xl border border-slate-200 bg-white p-4">
                     <div>
-                      <p className="text-sm font-medium text-white">Product image</p>
-                      <p className="mt-1 text-sm text-slate-400">
+                      <p className="text-sm font-medium text-slate-900">Product image</p>
+                      <p className="mt-1 text-sm text-slate-600">
                         Upload a product photo so each item is easier to recognize on the board.
                       </p>
                     </div>
 
                     <label className="block">
-                      <span className="mb-2 block text-sm text-slate-300">Upload image file</span>
+                      <span className="mb-2 block text-sm text-slate-600">Upload image file</span>
                       <input
-                        className="w-full rounded-2xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-slate-200 file:mr-4 file:rounded-xl file:border-0 file:bg-emerald-400 file:px-3 file:py-2 file:text-sm file:font-medium file:text-slate-950 hover:file:bg-emerald-300"
+                        className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 file:mr-4 file:rounded-xl file:border-0 file:bg-emerald-400 file:px-3 file:py-2 file:text-sm file:font-medium file:text-slate-950 hover:file:bg-emerald-300"
                         type="file"
                         accept="image/png,image/jpeg,image/webp,image/gif"
                         onChange={(event) => void handleProductImageUpload(event)}
@@ -2951,7 +2992,7 @@ function ProductDrawer({
 
                     {productEditor.imagePath ? (
                       <button
-                        className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-70"
+                        className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-70"
                         onClick={() => void handleRemoveProductImage()}
                         disabled={saving}
                       >
@@ -3151,26 +3192,26 @@ function ProductDrawer({
           {drawerTab === "costs" ? (
             <Card title="Costs">
               <div className="space-y-4">
-                <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-4">
-                  <p className="text-xs uppercase tracking-[0.2em] text-emerald-200">
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                  <p className="text-xs uppercase tracking-[0.2em] text-emerald-700">
                     Total product cost
                   </p>
-                  <p className="mt-2 text-3xl font-semibold text-white">
+                  <p className="mt-2 text-3xl font-semibold text-slate-900">
                     {currency(getProductTotalCost(selectedProduct))}
                   </p>
-                  <p className="mt-1 text-sm text-emerald-100/80">
+                  <p className="mt-1 text-sm text-emerald-700/80">
                     {selectedProduct.costs.length} expense entries for {selectedProduct.name}
                   </p>
                 </div>
 
-                <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4">
+                <div className="rounded-2xl border border-slate-200 bg-white p-4">
                   <div className="mb-4 flex items-center justify-between gap-3">
-                    <p className="font-medium text-white">
+                    <p className="font-medium text-slate-900">
                       {costEditor.id ? "Edit cost entry" : "Add cost entry"}
                     </p>
                     {costEditor.id ? (
                       <button
-                        className="text-sm text-slate-300 transition hover:text-white"
+                        className="text-sm text-slate-600 transition hover:text-slate-900"
                         onClick={cancelEditingCost}
                       >
                         Cancel edit
@@ -3275,17 +3316,17 @@ function ProductDrawer({
                       .map((entry) => (
                         <div
                           key={entry.id}
-                          className="rounded-2xl border border-white/10 bg-slate-900/70 p-4"
+                          className="rounded-2xl border border-slate-200 bg-white p-4"
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div>
-                              <p className="font-medium text-white">{entry.title}</p>
-                              <p className="mt-1 text-sm text-slate-400">
+                              <p className="font-medium text-slate-900">{entry.title}</p>
+                              <p className="mt-1 text-sm text-slate-600">
                                 {entry.description || "No description"}
                               </p>
                             </div>
                             <div className="text-right">
-                              <p className="font-medium text-emerald-200">
+                              <p className="font-medium text-emerald-700">
                                 {currency(entry.amount)}
                               </p>
                               <p className="mt-1 text-xs uppercase tracking-[0.16em] text-slate-500">
@@ -3297,13 +3338,13 @@ function ProductDrawer({
                             <p className="text-xs text-slate-500">{formatDate(entry.entryDate)}</p>
                             <div className="flex gap-2">
                               <button
-                                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-white transition hover:bg-white/10"
+                                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
                                 onClick={() => startEditingCost(entry)}
                               >
                                 Edit
                               </button>
                               <button
-                                className="rounded-xl border border-rose-400/20 bg-rose-400/10 px-3 py-2 text-xs font-medium text-rose-100 transition hover:bg-rose-400/20"
+                                className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700 transition hover:bg-rose-100"
                                 onClick={() => void handleDeleteCostEntry(entry.id)}
                               >
                                 Delete
@@ -3328,9 +3369,9 @@ function ProductDrawer({
               <div className="space-y-3">
                 {selectedProduct.activity.length ? (
                   selectedProduct.activity.map((entry) => (
-                    <div key={entry.id} className="rounded-2xl border border-white/10 bg-slate-900/70 p-4">
-                      <p className="font-medium text-white">{entry.message}</p>
-                      <p className="mt-2 text-sm text-slate-400">{entry.user}</p>
+                    <div key={entry.id} className="rounded-2xl border border-slate-200 bg-white p-4">
+                      <p className="font-medium text-slate-900">{entry.message}</p>
+                      <p className="mt-2 text-sm text-slate-600">{entry.user}</p>
                       <p className="mt-1 text-xs text-slate-500">{formatDate(entry.createdAt.slice(0, 10))}</p>
                     </div>
                   ))
@@ -3380,7 +3421,7 @@ function ProductBoard({
         return (
           <div
             key={status}
-            className="overflow-hidden rounded-[28px] border border-white/10 bg-white/5 p-4 shadow-lg shadow-black/10"
+            className="overflow-hidden rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm"
           >
             <div className="mb-4 flex items-center justify-between">
               <div>
@@ -3401,8 +3442,8 @@ function ProductBoard({
                       className={cn(
                         "w-full rounded-3xl border p-3 text-left transition",
                         selectedProductId === product.id
-                          ? "border-emerald-400/50 bg-emerald-400/10"
-                          : "border-white/10 bg-slate-900/70 hover:bg-slate-900",
+                          ? "border-emerald-300 bg-emerald-50"
+                          : "border-slate-200 bg-slate-50 hover:bg-white",
                       )}
                       onClick={() => onSelectProduct(product)}
                     >
@@ -3415,12 +3456,12 @@ function ProductBoard({
                         <div className="min-w-0 flex-1">
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <p className="truncate font-medium text-white">{product.name}</p>
-                              <p className="mt-1 truncate text-xs text-slate-400">
+                              <p className="truncate font-medium text-slate-900">{product.name}</p>
+                              <p className="mt-1 truncate text-xs text-slate-500">
                                 {product.category}
                               </p>
                             </div>
-                            <span className="shrink-0 rounded-full border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300">
+                            <span className="shrink-0 rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-600">
                               {currency(getProductTotalCost(product))}
                             </span>
                           </div>
@@ -3431,7 +3472,7 @@ function ProductBoard({
 
                           <div className="mt-2 flex flex-wrap gap-2">
                             {product.owner ? (
-                              <span className="rounded-full border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300">
+                              <span className="rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-600">
                                 {product.owner}
                               </span>
                             ) : null}
@@ -3445,18 +3486,18 @@ function ProductBoard({
                             </span>
                           </div>
 
-                          <div className="mt-3 rounded-2xl border border-cyan-400/10 bg-cyan-400/5 px-3 py-2">
-                            <p className="text-[10px] uppercase tracking-[0.18em] text-cyan-200/70">
+                          <div className="mt-3 rounded-2xl border border-cyan-200 bg-cyan-50 px-3 py-2">
+                            <p className="text-[10px] uppercase tracking-[0.18em] text-cyan-600">
                               Next action
                             </p>
-                            <p className="mt-1 text-sm font-medium text-cyan-50">{nextAction}</p>
+                            <p className="mt-1 text-sm font-medium text-cyan-800">{nextAction}</p>
                           </div>
 
-                          <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] px-3 py-2">
+                          <div className="mt-3 rounded-2xl border border-slate-200 bg-white px-3 py-2">
                             <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">
                               {primaryMilestone.label}
                             </p>
-                            <p className="mt-1 text-sm font-medium text-slate-100">
+                            <p className="mt-1 text-sm font-medium text-slate-900">
                               {formatDate(primaryMilestone.date)}
                             </p>
                           </div>
@@ -3509,8 +3550,8 @@ function ProductListView({
 }) {
   return (
     <Card title="Products List">
-      <div className="overflow-x-auto rounded-3xl border border-white/10 bg-slate-900/60">
-        <div className="grid grid-cols-[minmax(0,2.2fr)_1fr_1.2fr_1.3fr_1.1fr_0.9fr_0.9fr] gap-3 border-b border-white/10 px-4 py-3 text-[11px] uppercase tracking-[0.18em] text-slate-500">
+      <div className="overflow-x-auto rounded-3xl border border-slate-200 bg-white">
+        <div className="grid grid-cols-[minmax(0,2.2fr)_1fr_1.2fr_1.3fr_1.1fr_0.9fr_0.9fr] gap-3 border-b border-slate-200 px-4 py-3 text-[11px] uppercase tracking-[0.18em] text-slate-500">
           <div>Product</div>
           <div>Status</div>
           <div>Drop</div>
@@ -3530,8 +3571,8 @@ function ProductListView({
                 <div
                   key={product.id}
                   className={cn(
-                    "grid grid-cols-[minmax(0,2.2fr)_1fr_1.2fr_1.3fr_1.1fr_0.9fr_0.9fr] items-center gap-3 border-b border-white/5 px-4 py-3 transition",
-                    selectedProductId === product.id && "bg-emerald-400/10",
+                    "grid grid-cols-[minmax(0,2.2fr)_1fr_1.2fr_1.3fr_1.1fr_0.9fr_0.9fr] items-center gap-3 border-b border-slate-200 px-4 py-3 transition",
+                    selectedProductId === product.id && "bg-emerald-50",
                     getUrgencyTone(product, dropDays),
                   )}
                 >
@@ -3545,8 +3586,8 @@ function ProductListView({
                       variant="list"
                     />
                     <div className="min-w-0">
-                      <p className="truncate font-medium text-white">{product.name}</p>
-                      <p className="truncate text-xs text-slate-400">
+                      <p className="truncate font-medium text-slate-900">{product.name}</p>
+                      <p className="truncate text-xs text-slate-500">
                         {product.category}
                         {product.owner ? ` · ${product.owner}` : ""}
                       </p>
@@ -3564,7 +3605,7 @@ function ProductListView({
                     </span>
                   </div>
 
-                  <div className="truncate text-sm text-slate-300">
+                  <div className="truncate text-sm text-slate-600">
                     {getDropDayName(dropDays, product.dropDayId)}
                   </div>
 
@@ -3579,19 +3620,19 @@ function ProductListView({
                         {product.priority}
                       </span>
                     </div>
-                    <p className="truncate text-sm font-medium text-cyan-50">{nextAction}</p>
+                    <p className="truncate text-sm font-medium text-cyan-800">{nextAction}</p>
                   </div>
 
                   <div className="min-w-0">
                     <p className="truncate text-xs uppercase tracking-[0.16em] text-slate-500">
                       {primaryMilestone.label}
                     </p>
-                    <p className="truncate text-sm text-slate-100">
+                    <p className="truncate text-sm text-slate-900">
                       {formatDate(primaryMilestone.date)}
                     </p>
                   </div>
 
-                  <div className="text-sm font-medium text-slate-100">
+                  <div className="text-sm font-medium text-slate-900">
                     {currency(getProductTotalCost(product))}
                   </div>
 
@@ -3647,7 +3688,7 @@ function ProductImagePreview({
     return (
       <div
         className={cn(
-          "flex items-center justify-center border border-dashed border-white/10 bg-slate-900/60 text-[11px] uppercase tracking-[0.2em] text-slate-500",
+          "flex items-center justify-center border border-dashed border-slate-200 bg-slate-50 text-[11px] uppercase tracking-[0.2em] text-slate-500",
           sizeClasses,
         )}
       >
@@ -3657,7 +3698,7 @@ function ProductImagePreview({
   }
 
   return (
-    <div className={cn("overflow-hidden border border-white/10 bg-slate-900/60", sizeClasses)}>
+    <div className={cn("overflow-hidden border border-slate-200 bg-white", sizeClasses)}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         src={imageUrl}
@@ -3708,7 +3749,7 @@ function CalendarView({
       <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
         <div className="flex items-center gap-3">
           <button
-            className="rounded-2xl border border-white/10 bg-slate-900/70 p-3 transition hover:bg-white/10"
+            className="rounded-2xl border border-slate-200 bg-white p-3 transition hover:bg-slate-50"
             onClick={onPrevious}
           >
             <ChevronLeft className="h-4 w-4" />
@@ -3718,7 +3759,7 @@ function CalendarView({
             <p className="mt-1 text-xl font-semibold">{format(calendarMonth, "MMMM yyyy")}</p>
           </div>
           <button
-            className="rounded-2xl border border-white/10 bg-slate-900/70 p-3 transition hover:bg-white/10"
+            className="rounded-2xl border border-slate-200 bg-white p-3 transition hover:bg-slate-50"
             onClick={onNext}
           >
             <ChevronRight className="h-4 w-4" />
@@ -3732,11 +3773,11 @@ function CalendarView({
             <Plus className="h-4 w-4" />
             Add event
           </button>
-          <div className="inline-flex rounded-2xl border border-white/10 bg-slate-900/70 p-1">
+          <div className="inline-flex rounded-2xl border border-slate-200 bg-slate-50 p-1">
             <button
               className={cn(
                 "rounded-xl px-4 py-2 text-sm font-medium transition",
-                mode === "month" ? "bg-emerald-400 text-slate-950" : "text-slate-300 hover:bg-white/5",
+                mode === "month" ? "bg-emerald-400 text-slate-950" : "text-slate-600 hover:bg-white",
               )}
               onClick={() => onModeChange("month")}
             >
@@ -3745,7 +3786,7 @@ function CalendarView({
             <button
               className={cn(
                 "rounded-xl px-4 py-2 text-sm font-medium transition",
-                mode === "agenda" ? "bg-emerald-400 text-slate-950" : "text-slate-300 hover:bg-white/5",
+                mode === "agenda" ? "bg-emerald-400 text-slate-950" : "text-slate-600 hover:bg-white",
               )}
               onClick={() => onModeChange("agenda")}
             >
@@ -3797,10 +3838,10 @@ function CalendarView({
                   className={cn(
                     "min-h-36 rounded-3xl border p-3 transition",
                     isSameMonth(day, calendarMonth)
-                      ? "border-white/10 bg-slate-900/70"
-                      : "border-white/5 bg-slate-900/30",
-                    isToday(day) && "border-emerald-400/40 bg-emerald-400/5",
-                    dragOverDate === dateKey && "border-cyan-300/60 bg-cyan-400/10",
+                      ? "border-slate-200 bg-white"
+                      : "border-slate-200 bg-slate-50/70",
+                    isToday(day) && "border-emerald-300 bg-emerald-50",
+                    dragOverDate === dateKey && "border-cyan-300 bg-cyan-50",
                   )}
                   onDragOver={(event) => {
                     event.preventDefault();
@@ -3831,7 +3872,7 @@ function CalendarView({
                     <span
                       className={cn(
                         "inline-flex h-8 w-8 items-center justify-center rounded-full text-sm font-medium",
-                        isToday(day) ? "bg-emerald-400 text-slate-950" : "bg-white/5 text-white",
+                        isToday(day) ? "bg-emerald-400 text-slate-950" : "bg-slate-100 text-slate-700",
                       )}
                     >
                       {format(day, "d")}
@@ -3940,26 +3981,26 @@ function DropDayOverview({
           return (
             <div
               key={dropDay.id}
-              className="rounded-[28px] border border-white/10 bg-white/5 p-5 text-left transition hover:bg-white/[0.08]"
+              className="rounded-[28px] border border-slate-200 bg-white p-5 text-left transition hover:bg-slate-50"
             >
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="text-xl font-semibold text-white">{dropDay.name}</h3>
+                    <h3 className="text-xl font-semibold text-slate-900">{dropDay.name}</h3>
                     {dropDay.archived ? (
-                      <span className="rounded-full border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300">
+                      <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-600">
                         Archived
                       </span>
                     ) : null}
                   </div>
-                  <p className="mt-2 text-sm text-slate-300">{dropDay.description}</p>
+                  <p className="mt-2 text-sm text-slate-600">{dropDay.description}</p>
                 </div>
                 <div className="flex flex-col items-end gap-2">
-                  <span className="rounded-full border border-white/10 bg-slate-900/70 px-3 py-1 text-xs text-slate-300">
+                  <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-600">
                     {formatDate(dropDay.targetDate)}
                   </span>
                   <button
-                    className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-white transition hover:bg-white/10"
+                    className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
                     onClick={() => onToggleArchive(dropDay.id, !dropDay.archived)}
                   >
                     {dropDay.archived ? "Restore" : "Archive"}
@@ -3968,7 +4009,7 @@ function DropDayOverview({
               </div>
 
               <button
-                className="mt-5 w-full rounded-2xl border border-white/10 bg-slate-900/60 px-4 py-3 text-left text-sm font-medium text-white transition hover:bg-slate-900"
+                className="mt-5 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-left text-sm font-medium text-slate-700 transition hover:bg-white"
                 onClick={() => onOpenDrop(dropDay.id)}
               >
                 Open drop workspace
@@ -3978,19 +4019,19 @@ function DropDayOverview({
                 <MiniMetric
                   label="Products"
                   value={String(dropProducts.length)}
-                  accent="text-white"
+                  accent="text-slate-900"
                 />
                 <MiniMetric
                   label="Bulk items"
                   value={String(
                     dropProducts.filter((product) => product.status === "bulk").length,
                   )}
-                  accent="text-amber-200"
+                  accent="text-amber-700"
                 />
                 <MiniMetric
                   label="Tracked cost"
                   value={currency(totalCost)}
-                  accent="text-emerald-200"
+                  accent="text-emerald-700"
                 />
               </div>
             </div>
@@ -4027,29 +4068,29 @@ function TimelineSummary({ product }: { product: Product }) {
 
   return (
     <div className="grid gap-3 sm:grid-cols-3">
-      <div className="rounded-2xl border border-white/10 bg-slate-900/70 p-4">
+      <div className="rounded-2xl border border-slate-200 bg-white p-4">
         <p className="text-xs uppercase tracking-[0.16em] text-slate-400">
           Estimated sample arrival
         </p>
-        <p className="mt-2 text-lg font-semibold text-white">{formatDate(sampleArrivalDate)}</p>
+        <p className="mt-2 text-lg font-semibold text-slate-900">{formatDate(sampleArrivalDate)}</p>
         <p className="mt-1 text-sm text-slate-400">
           {sampleCountdown === null
             ? "Add sample ordered date plus production and shipping business days."
             : `${sampleCountdown} days from today`}
         </p>
       </div>
-      <div className="rounded-2xl border border-white/10 bg-slate-900/70 p-4">
+      <div className="rounded-2xl border border-slate-200 bg-white p-4">
         <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Estimated bulk ready</p>
-        <p className="mt-2 text-lg font-semibold text-white">{formatDate(bulkReadyDate)}</p>
+        <p className="mt-2 text-lg font-semibold text-slate-900">{formatDate(bulkReadyDate)}</p>
         <p className="mt-1 text-sm text-slate-400">
           {bulkCountdown === null
             ? "Add a bulk start date and production business-day lead time."
             : `${bulkCountdown} days from today`}
         </p>
       </div>
-      <div className="rounded-2xl border border-white/10 bg-slate-900/70 p-4">
+      <div className="rounded-2xl border border-slate-200 bg-white p-4">
         <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Estimated arrival</p>
-        <p className="mt-2 text-lg font-semibold text-white">{formatDate(arrivalDate)}</p>
+        <p className="mt-2 text-lg font-semibold text-slate-900">{formatDate(arrivalDate)}</p>
         <p className="mt-1 text-sm text-slate-400">
           {arrivalCountdown === null
             ? "Add shipping business days to estimate delivery."
@@ -4074,8 +4115,8 @@ function StatCard({
   onClick?: () => void;
 }) {
   const className = cn(
-    "rounded-[28px] border border-white/10 bg-white/5 p-5 text-left",
-    onClick && "transition hover:bg-white/[0.08] hover:border-white/15",
+    "rounded-[28px] border border-slate-200 bg-white p-5 text-left shadow-sm",
+    onClick && "transition hover:bg-slate-50 hover:border-slate-300",
   );
 
   if (onClick) {
@@ -4084,11 +4125,11 @@ function StatCard({
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-xs uppercase tracking-[0.2em] text-slate-400">{label}</p>
-            <p className="mt-3 text-3xl font-semibold text-white">{value}</p>
-            <p className="mt-2 text-sm text-slate-400">{description}</p>
+            <p className="mt-3 text-3xl font-semibold text-slate-900">{value}</p>
+            <p className="mt-2 text-sm text-slate-500">{description}</p>
           </div>
-          <div className="rounded-2xl border border-white/10 bg-slate-900/70 p-3">
-            <Icon className="h-5 w-5 text-emerald-200" />
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3">
+            <Icon className="h-5 w-5 text-emerald-700" />
           </div>
         </div>
       </button>
@@ -4100,11 +4141,11 @@ function StatCard({
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs uppercase tracking-[0.2em] text-slate-400">{label}</p>
-          <p className="mt-3 text-3xl font-semibold text-white">{value}</p>
-          <p className="mt-2 text-sm text-slate-400">{description}</p>
+          <p className="mt-3 text-3xl font-semibold text-slate-900">{value}</p>
+          <p className="mt-2 text-sm text-slate-500">{description}</p>
         </div>
-        <div className="rounded-2xl border border-white/10 bg-slate-900/70 p-3">
-          <Icon className="h-5 w-5 text-emerald-200" />
+        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3">
+          <Icon className="h-5 w-5 text-emerald-700" />
         </div>
       </div>
     </div>
@@ -4121,7 +4162,7 @@ function MiniMetric({
   accent: string;
 }) {
   return (
-    <div className="rounded-2xl border border-white/10 bg-slate-900/70 p-4">
+    <div className="rounded-2xl border border-slate-200 bg-white p-4">
       <p className="text-xs uppercase tracking-[0.16em] text-slate-500">{label}</p>
       <p className={cn("mt-2 text-lg font-semibold", accent)}>{value}</p>
     </div>
@@ -4142,8 +4183,8 @@ function Banner({
       className={cn(
         "flex items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-sm",
         tone === "error"
-          ? "border-rose-500/30 bg-rose-500/10 text-rose-100"
-          : "border-emerald-500/30 bg-emerald-500/10 text-emerald-100",
+          ? "border-rose-200 bg-rose-50 text-rose-700"
+          : "border-emerald-200 bg-emerald-50 text-emerald-700",
       )}
     >
       <p>{message}</p>
@@ -4164,8 +4205,8 @@ function Card({
   className?: string;
 }) {
   return (
-    <section className={cn("rounded-[28px] border border-white/10 bg-white/5 p-5 shadow-lg shadow-black/10", className)}>
-      <h2 className="mb-4 text-lg font-semibold text-white">{title}</h2>
+    <section className={cn("rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm", className)}>
+      <h2 className="mb-4 text-lg font-semibold text-slate-900">{title}</h2>
       {children}
     </section>
   );
@@ -4179,9 +4220,9 @@ function EmptyState({
   description: string;
 }) {
   return (
-    <div className="rounded-2xl border border-dashed border-white/10 bg-slate-900/40 p-5 text-center">
-      <p className="font-medium text-white">{title}</p>
-      <p className="mt-2 text-sm text-slate-400">{description}</p>
+    <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-5 text-center">
+      <p className="font-medium text-slate-900">{title}</p>
+      <p className="mt-2 text-sm text-slate-600">{description}</p>
     </div>
   );
 }
@@ -4199,9 +4240,9 @@ function Input({
 }) {
   return (
     <label className="block">
-      <span className="mb-2 block text-sm text-slate-300">{label}</span>
+      <span className="mb-2 block text-sm text-slate-600">{label}</span>
       <input
-        className="w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400"
+        className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-emerald-400"
         type={type}
         value={value}
         onChange={(event) => onChange(event.target.value)}
@@ -4223,9 +4264,9 @@ function TextArea({
 }) {
   return (
     <label className={cn("block", className)}>
-      <span className="mb-2 block text-sm text-slate-300">{label}</span>
+      <span className="mb-2 block text-sm text-slate-600">{label}</span>
       <textarea
-        className="min-h-28 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400"
+        className="min-h-28 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-emerald-400"
         value={value}
         onChange={(event) => onChange(event.target.value)}
       />
@@ -4248,10 +4289,10 @@ function Select({
 }) {
   return (
     <label className="block">
-      {!compact ? <span className="mb-2 block text-sm text-slate-300">{label}</span> : null}
+      {!compact ? <span className="mb-2 block text-sm text-slate-600">{label}</span> : null}
       <select
         className={cn(
-          "w-full rounded-2xl border border-white/10 bg-slate-900 text-sm text-white outline-none transition focus:border-emerald-400",
+          "w-full rounded-2xl border border-slate-200 bg-white text-sm text-slate-900 outline-none transition focus:border-emerald-400",
           compact ? "px-3 py-2.5" : "px-4 py-3",
         )}
         value={value}
