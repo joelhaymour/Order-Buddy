@@ -241,6 +241,7 @@ set search_path = public
 as $$
 declare
   normalized_email text := lower(trim(initial_admin_email));
+  configured_admin_email text;
   existing_admin_email text;
 begin
   if normalized_email = '' or position('@' in normalized_email) = 0 then
@@ -248,6 +249,16 @@ begin
   end if;
   if length(trim(initial_store_name)) = 0 then
     raise exception 'Store name is required';
+  end if;
+
+  select workspace_settings.initial_admin_email
+  into configured_admin_email
+  from public.workspace_settings
+  where id = true;
+
+  if configured_admin_email is not null
+     and lower(configured_admin_email) <> normalized_email then
+    raise exception 'This workspace is already initialized for a different administrator';
   end if;
 
   select email
