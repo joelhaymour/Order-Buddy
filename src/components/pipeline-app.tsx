@@ -1454,6 +1454,52 @@ export function PipelineApp() {
     await refreshSupabaseData();
   }
 
+  async function handleQuickWorkflowActionUpdate(
+    productId: string,
+    workflowAction: WorkflowAction | null,
+  ) {
+    const product = data.products.find((item) => item.id === productId);
+    if (!product) {
+      return;
+    }
+
+    const nextProduct: Product = {
+      ...product,
+      workflowAction,
+      nextAction: "",
+      activity: appendActivity(
+        product,
+        workflowAction
+          ? `Next action changed to ${workflowActionLabels[workflowAction]}`
+          : "Next action returned to automatic",
+        activeUserEmail,
+      ),
+      updatedAt: new Date().toISOString(),
+    };
+
+    setSaving(true);
+    setError("");
+    setMessage("");
+
+    const saveError = await saveProductRecord(nextProduct);
+    if (saveError) {
+      setError(saveError);
+      setSaving(false);
+      return;
+    }
+
+    if (selectedProductId === productId) {
+      setProductEditor(nextProduct);
+    }
+
+    setSaving(false);
+    setMessage(
+      workflowAction
+        ? `${product.name} next action updated.`
+        : `${product.name} next action is now automatic.`,
+    );
+  }
+
   function openNewCalendarEvent() {
     setCalendarEventDraft({
       ...emptyCalendarEventDraft,
@@ -2477,6 +2523,7 @@ export function PipelineApp() {
                     dropDays={data.dropDays}
                     onSelectProduct={openProduct}
                     onMoveStatus={handleQuickStatusUpdate}
+                    onChangeNextAction={handleQuickWorkflowActionUpdate}
                     selectedProductId={selectedProductId}
                   />
                 )}
@@ -3703,12 +3750,14 @@ function ProductListView({
   dropDays,
   onSelectProduct,
   onMoveStatus,
+  onChangeNextAction,
   selectedProductId,
 }: {
   products: ProductWithCosts[];
   dropDays: DropDay[];
   onSelectProduct: (product: ProductWithCosts) => void;
   onMoveStatus: (productId: string, status: ProductStatus) => void;
+  onChangeNextAction: (productId: string, action: WorkflowAction | null) => void;
   selectedProductId: string | null;
 }) {
   return (
@@ -3728,7 +3777,19 @@ function ProductListView({
           {products.length ? (
             products.map((product) => {
               const primaryMilestone = getProductPrimaryMilestone(product, dropDays);
-              const nextAction = getProductNextAction(product);
+              const nextActionValue = product.nextAction.trim()
+                ? "__manual"
+                : product.workflowAction ?? "";
+              const nextActionOptions = [
+                ...(product.nextAction.trim()
+                  ? [{ value: "__manual", label: `Manual: ${product.nextAction.trim()}` }]
+                  : []),
+                {
+                  value: "",
+                  label: `Automatic (${getAutomaticProductNextAction(product)})`,
+                },
+                ...workflowActionOptions.slice(1),
+              ];
 
               return (
                 <div
@@ -3783,7 +3844,21 @@ function ProductListView({
                         {product.priority}
                       </span>
                     </div>
-                    <p className="truncate text-sm font-medium text-cyan-800">{nextAction}</p>
+                    <Select
+                      label="Next action"
+                      value={nextActionValue}
+                      onChange={(value) => {
+                        if (value === "__manual") {
+                          return;
+                        }
+                        void onChangeNextAction(
+                          product.id,
+                          (value || null) as WorkflowAction | null,
+                        );
+                      }}
+                      options={nextActionOptions}
+                      compact
+                    />
                   </div>
 
                   <div className="min-w-0">
