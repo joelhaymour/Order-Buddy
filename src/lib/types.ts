@@ -28,6 +28,47 @@ export type ProductStatus = (typeof productStatuses)[number];
 export type WorkflowAction = (typeof workflowActions)[number];
 export type CostType = (typeof costTypes)[number];
 export type ProductPriority = "low" | "medium" | "high" | "urgent";
+export type WorkspaceRole = "admin" | "member";
+export type WorkspaceMemberStatus = "pending" | "active" | "removed";
+export type WorkspacePermission =
+  | "create_products"
+  | "edit_products"
+  | "move_stages"
+  | "manage_calendar"
+  | "manage_drop_days"
+  | "manage_events"
+  | "manage_images"
+  | "add_costs"
+  | "edit_costs"
+  | "delete_costs"
+  | "view_cost_amounts"
+  | "view_total_costs";
+export type WorkspacePermissions = Record<WorkspacePermission, boolean>;
+
+export type WorkspaceSettings = {
+  storeName: string;
+};
+
+export type WorkspaceMember = {
+  userId: string;
+  email: string;
+  fullName: string;
+  role: WorkspaceRole;
+  status: WorkspaceMemberStatus;
+  permissions: WorkspacePermissions;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkspaceInvitation = {
+  id: string;
+  email: string;
+  role: WorkspaceRole;
+  permissions: WorkspacePermissions;
+  status: "pending" | "accepted" | "revoked" | "failed";
+  expiresAt: string;
+  createdAt: string;
+};
 
 export type ActivityEntry = {
   id: string;
@@ -99,6 +140,7 @@ export type Product = {
 
 export type ProductWithCosts = Product & {
   costs: CostEntry[];
+  totalCost: number | null;
 };
 
 export type AppData = {

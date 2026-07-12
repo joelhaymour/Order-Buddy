@@ -24,10 +24,18 @@ import {
   Package2,
   Plus,
   Receipt,
+  Settings2,
   Target,
   Truck,
+  UserPlus,
 } from "lucide-react";
 
+import {
+  defaultWorkspacePermissions,
+  hasWorkspacePermission,
+  normalizeWorkspacePermissions,
+  workspacePermissionOptions,
+} from "@/lib/access";
 import {
   calculateArrivalDate,
   calculateSampleArrivalDate,
@@ -65,6 +73,13 @@ import type {
   ProductDraft,
   ProductStatus,
   ProductWithCosts,
+  WorkspaceInvitation,
+  WorkspaceMember,
+  WorkspaceMemberStatus,
+  WorkspacePermission,
+  WorkspacePermissions,
+  WorkspaceRole,
+  WorkspaceSettings,
   WorkflowAction,
 } from "@/lib/types";
 import { costTypes, productStatuses, workflowActions } from "@/lib/types";
@@ -76,7 +91,7 @@ import {
 } from "@/lib/workflow-meta";
 import { cn, createId } from "@/lib/utils";
 
-type View = "dashboard" | "products" | "calendar" | "drops";
+type View = "dashboard" | "products" | "calendar" | "drops" | "settings";
 type Scope = "all" | string;
 type ProductLayout = "board" | "list";
 type ProductSort = "next-action" | "name" | "cost-high" | "newest";
@@ -169,6 +184,32 @@ type CostEntryRow = {
   created_at: string;
 };
 
+type WorkspaceMemberRow = {
+  user_id: string;
+  email: string;
+  full_name: string;
+  role: WorkspaceRole;
+  status: WorkspaceMemberStatus;
+  permissions: unknown;
+  created_at: string;
+  updated_at: string;
+};
+
+type WorkspaceInvitationRow = {
+  id: string;
+  email: string;
+  role: WorkspaceRole;
+  permissions: unknown;
+  status: WorkspaceInvitation["status"];
+  expires_at: string;
+  created_at: string;
+};
+
+type ProductCostTotalRow = {
+  product_id: string;
+  total: number | string;
+};
+
 const productPriorityOptions: { value: ProductPriority; label: string }[] = [
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
@@ -202,6 +243,7 @@ const navItems: { id: View; label: string; icon: typeof Layers3 }[] = [
   { id: "products", label: "All Products", icon: Package2 },
   { id: "calendar", label: "Calendar", icon: CalendarDays },
   { id: "drops", label: "Drop Days", icon: Target },
+  { id: "settings", label: "Settings", icon: Settings2 },
 ];
 
 const emptyProductDraft: ProductDraft = {
@@ -302,6 +344,31 @@ function mapCostRow(row: CostEntryRow): CostEntry {
     amount: row.amount,
     entryDate: row.entry_date,
     costType: row.cost_type,
+    createdAt: row.created_at,
+  };
+}
+
+function mapWorkspaceMember(row: WorkspaceMemberRow): WorkspaceMember {
+  return {
+    userId: row.user_id,
+    email: row.email,
+    fullName: row.full_name,
+    role: row.role,
+    status: row.status,
+    permissions: normalizeWorkspacePermissions(row.permissions),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapWorkspaceInvitation(row: WorkspaceInvitationRow): WorkspaceInvitation {
+  return {
+    id: row.id,
+    email: row.email,
+    role: row.role,
+    permissions: normalizeWorkspacePermissions(row.permissions),
+    status: row.status,
+    expiresAt: row.expires_at,
     createdAt: row.created_at,
   };
 }
@@ -610,11 +677,44 @@ export function PipelineApp() {
   const [showArchivedDrops, setShowArchivedDrops] = useState(false);
   const [calendarEventDraft, setCalendarEventDraft] =
     useState<CalendarEventDraft>(emptyCalendarEventDraft);
+  const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings>({
+    storeName: "Order Buddy",
+  });
+  const [storeNameDraft, setStoreNameDraft] = useState("Order Buddy");
+  const [membership, setMembership] = useState<WorkspaceMember | null>(null);
+  const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
+  const [workspaceInvitations, setWorkspaceInvitations] = useState<WorkspaceInvitation[]>([]);
+  const [productCostTotals, setProductCostTotals] = useState<Record<string, number> | null>(
+    authMode === "demo" ? {} : null,
+  );
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<WorkspaceRole>("member");
+  const [invitePermissions, setInvitePermissions] = useState<WorkspacePermissions>(
+    defaultWorkspacePermissions,
+  );
 
   const productsWithCosts = useMemo(
-    () => attachCosts(data.products, data.costEntries),
-    [data.products, data.costEntries],
+    () =>
+      attachCosts(
+        data.products,
+        data.costEntries,
+        authMode === "demo" ? undefined : productCostTotals,
+      ),
+    [authMode, data.products, data.costEntries, productCostTotals],
   );
+
+  const isAdmin = authMode === "demo" || membership?.role === "admin";
+  const can = (permission: WorkspacePermission) =>
+    authMode === "demo" || hasWorkspacePermission(membership, permission);
+  const canManageCalendar = can("manage_calendar");
+  const canManageEvents = can("manage_events");
+  function requirePermission(permission: WorkspacePermission, label: string) {
+    if (can(permission)) {
+      return true;
+    }
+    setError(`You do not have permission to ${label}.`);
+    return false;
+  }
 
   const filteredProducts = useMemo(() => {
     if (scope === "all") {
@@ -807,6 +907,42 @@ export function PipelineApp() {
   }, []);
 
   useEffect(() => {
+    if (authMode !== "supabase" || !supabase || !membership?.userId) {
+      return;
+    }
+
+    const channel = supabase
+      .channel(`workspace-access-${membership.userId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "workspace_members",
+          filter: `user_id=eq.${membership.userId}`,
+        },
+        (payload) => {
+          const nextMembership = mapWorkspaceMember(payload.new as WorkspaceMemberRow);
+          setMembership(nextMembership);
+          if (nextMembership.status !== "active") {
+            setData(createEmptyAppData());
+            setProductCostTotals(null);
+            setView("dashboard");
+            return;
+          }
+          void refreshSupabaseData(nextMembership);
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+    // refreshSupabaseData is intentionally driven by the access change payload.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authMode, membership?.userId, supabase]);
+
+  useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
@@ -911,7 +1047,29 @@ export function PipelineApp() {
     return null;
   }
 
+  async function saveDropEventMetadata(updatedDropDay: DropDay) {
+    if (authMode === "demo") {
+      return saveDropDayRecord(updatedDropDay);
+    }
+    if (!supabase) {
+      return "Supabase is not configured correctly.";
+    }
+
+    const { error: updateError } = await supabase.rpc("update_drop_metadata", {
+      target_drop_day_id: updatedDropDay.id,
+      next_description: serializeDropDescription(updatedDropDay),
+    });
+    if (updateError) {
+      return updateError.message;
+    }
+    await refreshSupabaseData();
+    return null;
+  }
+
   async function toggleDropArchive(dropDayId: string, archived: boolean) {
+    if (!requirePermission("manage_drop_days", "manage drop days")) {
+      return;
+    }
     const dropDay = data.dropDays.find((item) => item.id === dropDayId);
     if (!dropDay) {
       return;
@@ -925,6 +1083,76 @@ export function PipelineApp() {
       return;
     }
     setMessage(archived ? "Drop archived." : "Drop restored.");
+  }
+
+  async function loadWorkspaceAccess(userId: string) {
+    if (!supabase) {
+      return null;
+    }
+
+    const { data: memberData, error: memberError } = await supabase
+      .from("workspace_members")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (memberError) {
+      setError(memberError.message);
+      return null;
+    }
+
+    const nextMembership = memberData
+      ? mapWorkspaceMember(memberData as WorkspaceMemberRow)
+      : null;
+    setMembership(nextMembership);
+
+    if (nextMembership?.status === "active") {
+      const { data: settingsData } = await supabase
+        .from("workspace_settings")
+        .select("store_name")
+        .eq("id", true)
+        .maybeSingle();
+      if (settingsData?.store_name) {
+        setWorkspaceSettings({ storeName: settingsData.store_name });
+        setStoreNameDraft(settingsData.store_name);
+      }
+    }
+
+    if (nextMembership?.role === "admin" && nextMembership.status === "active") {
+      await refreshWorkspaceAdminData();
+    } else {
+      setWorkspaceMembers([]);
+      setWorkspaceInvitations([]);
+    }
+
+    return nextMembership;
+  }
+
+  async function refreshWorkspaceAdminData() {
+    if (!supabase) {
+      return;
+    }
+
+    const [membersResponse, invitationsResponse] = await Promise.all([
+      supabase.from("workspace_members").select("*").order("created_at"),
+      supabase.from("workspace_invitations").select("*").order("created_at", { ascending: false }),
+    ]);
+
+    if (membersResponse.error || invitationsResponse.error) {
+      setError(
+        membersResponse.error?.message ??
+          invitationsResponse.error?.message ??
+          "Unable to load workspace members.",
+      );
+      return;
+    }
+
+    setWorkspaceMembers(
+      (membersResponse.data as WorkspaceMemberRow[]).map(mapWorkspaceMember),
+    );
+    setWorkspaceInvitations(
+      (invitationsResponse.data as WorkspaceInvitationRow[]).map(mapWorkspaceInvitation),
+    );
   }
 
   async function initializeApp() {
@@ -964,26 +1192,45 @@ export function PipelineApp() {
 
     setIsAuthenticated(true);
     setActiveUserEmail(session.user.email ?? "Signed in");
-    await refreshSupabaseData();
+    const access = await loadWorkspaceAccess(session.user.id);
+    if (access?.status === "active") {
+      await refreshSupabaseData(access);
+    }
     setLoading(false);
   }
 
-  async function refreshSupabaseData() {
+  async function refreshSupabaseData(accessMember: WorkspaceMember | null = membership) {
     if (!supabase) {
       return;
     }
 
-    const [dropResponse, productResponse, costResponse] = await Promise.all([
+    const canViewCostAmounts =
+      authMode === "demo" || hasWorkspacePermission(accessMember, "view_cost_amounts");
+    const canViewTotalCosts =
+      authMode === "demo" || hasWorkspacePermission(accessMember, "view_total_costs");
+
+    const [dropResponse, productResponse, costResponse, totalsResponse] = await Promise.all([
       supabase.from("drop_days").select("*").order("target_date", { ascending: true }),
       supabase.from("products").select("*").order("updated_at", { ascending: false }),
-      supabase.from("cost_entries").select("*").order("entry_date", { ascending: false }),
+      canViewCostAmounts
+        ? supabase.from("cost_entries").select("*").order("entry_date", { ascending: false })
+        : Promise.resolve({ data: [], error: null }),
+      canViewTotalCosts
+        ? supabase.rpc("get_product_cost_totals")
+        : Promise.resolve({ data: [], error: null }),
     ]);
 
-    if (dropResponse.error || productResponse.error || costResponse.error) {
+    if (
+      dropResponse.error ||
+      productResponse.error ||
+      costResponse.error ||
+      totalsResponse.error
+    ) {
       setError(
         dropResponse.error?.message ??
           productResponse.error?.message ??
           costResponse.error?.message ??
+          totalsResponse.error?.message ??
           "Unable to load data.",
       );
       return;
@@ -996,6 +1243,16 @@ export function PipelineApp() {
     };
 
     setData(nextData);
+    setProductCostTotals(
+      canViewTotalCosts
+        ? Object.fromEntries(
+            ((totalsResponse.data ?? []) as ProductCostTotalRow[]).map((row) => [
+              row.product_id,
+              Number(row.total),
+            ]),
+          )
+        : null,
+    );
     syncSelection(nextData, selectedProductId);
   }
 
@@ -1033,7 +1290,13 @@ export function PipelineApp() {
 
     setActiveUserEmail(response.data.user?.email ?? email);
     setIsAuthenticated(true);
-    await refreshSupabaseData();
+    const userId = response.data.user?.id;
+    if (userId) {
+      const access = await loadWorkspaceAccess(userId);
+      if (access?.status === "active") {
+        await refreshSupabaseData(access);
+      }
+    }
     setSaving(false);
   }
 
@@ -1044,12 +1307,99 @@ export function PipelineApp() {
 
     await supabase.auth.signOut();
     setIsAuthenticated(false);
+    setMembership(null);
+    setWorkspaceMembers([]);
+    setWorkspaceInvitations([]);
+    setWorkspaceSettings({ storeName: "Order Buddy" });
+    setStoreNameDraft("Order Buddy");
+    setProductCostTotals(null);
     setData(createEmptyAppData());
     setMessage("");
     setError("");
   }
 
+  async function handleSaveWorkspaceName(storeName: string) {
+    if (!supabase || !isAdmin) {
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    const { error: updateError } = await supabase.rpc("admin_update_workspace_name", {
+      next_store_name: storeName,
+    });
+    if (updateError) {
+      setError(updateError.message);
+      setSaving(false);
+      return;
+    }
+
+    setWorkspaceSettings({ storeName: storeName.trim() });
+    setSaving(false);
+    setMessage("Store name updated.");
+  }
+
+  async function handleUpdateWorkspaceMember(nextMember: WorkspaceMember) {
+    if (!supabase || !isAdmin) {
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    const { error: updateError } = await supabase.rpc("admin_update_member", {
+      target_user_id: nextMember.userId,
+      next_role: nextMember.role,
+      next_status: nextMember.status,
+      next_permissions: nextMember.permissions,
+    });
+    if (updateError) {
+      setError(updateError.message);
+      setSaving(false);
+      return;
+    }
+
+    await refreshWorkspaceAdminData();
+    setSaving(false);
+    setMessage(`${nextMember.email} updated.`);
+  }
+
+  async function handleSendWorkspaceInvitation() {
+    if (!supabase || !isAdmin || !inviteEmail.trim()) {
+      setError("Enter an email address to send an invitation.");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    const { error: inviteError } = await supabase.functions.invoke(
+      "invite-workspace-user",
+      {
+        body: {
+          email: inviteEmail.trim(),
+          role: inviteRole,
+          permissions: invitePermissions,
+          redirectTo: window.location.origin,
+        },
+      },
+    );
+    if (inviteError) {
+      setError(inviteError.message);
+      setSaving(false);
+      return;
+    }
+
+    setInviteEmail("");
+    setInviteRole("member");
+    setInvitePermissions(defaultWorkspacePermissions);
+    await refreshWorkspaceAdminData();
+    setSaving(false);
+    setMessage("Invitation sent.");
+  }
+
   async function handleAddDropDay() {
+    if (!requirePermission("manage_drop_days", "create drop days")) {
+      return;
+    }
     if (!dropDraft.name || !dropDraft.targetDate) {
       setError("Drop day name and target date are required.");
       return;
@@ -1133,6 +1483,9 @@ export function PipelineApp() {
   }
 
   async function handleSaveDropDay() {
+    if (!requirePermission("manage_drop_days", "edit drop days")) {
+      return;
+    }
     if (!dropDraft.name || !dropDraft.targetDate) {
       setError("Drop day name and target date are required.");
       return;
@@ -1172,6 +1525,9 @@ export function PipelineApp() {
   }
 
   async function handleAddProduct() {
+    if (!requirePermission("create_products", "create products")) {
+      return;
+    }
     if (!productDraft.name || !productDraft.category) {
       setError("Product name and category are required.");
       return;
@@ -1261,6 +1617,9 @@ export function PipelineApp() {
   }
 
   async function handleSaveProduct() {
+    if (!requirePermission("edit_products", "edit products")) {
+      return;
+    }
     if (!productEditor) {
       return;
     }
@@ -1287,6 +1646,10 @@ export function PipelineApp() {
   }
 
   async function handleProductImageUpload(event: ChangeEvent<HTMLInputElement>) {
+    if (!requirePermission("manage_images", "manage product images")) {
+      event.target.value = "";
+      return;
+    }
     const file = event.target.files?.[0];
     event.target.value = "";
 
@@ -1365,10 +1728,13 @@ export function PipelineApp() {
     };
 
     setProductEditor(updatedProduct);
-    const saveError = await saveProductRecord(updatedProduct);
-    if (saveError) {
+    const { error: imageUpdateError } = await supabase.rpc("set_product_image_path", {
+      target_product_id: productEditor.id,
+      next_image_path: nextImagePath,
+    });
+    if (imageUpdateError) {
       await supabase.storage.from(productImagesBucket).remove([nextImagePath]);
-      setError(saveError);
+      setError(imageUpdateError.message);
       setSaving(false);
       return;
     }
@@ -1377,11 +1743,15 @@ export function PipelineApp() {
       await supabase.storage.from(productImagesBucket).remove([oldImagePath]);
     }
 
+    await refreshSupabaseData();
     setSaving(false);
     setMessage("Product image uploaded.");
   }
 
   async function handleRemoveProductImage() {
+    if (!requirePermission("manage_images", "manage product images")) {
+      return;
+    }
     if (!productEditor?.imagePath) {
       return;
     }
@@ -1398,15 +1768,27 @@ export function PipelineApp() {
     };
 
     setProductEditor(updatedProduct);
-    const saveError = await saveProductRecord(updatedProduct);
-    if (saveError) {
-      setError(saveError);
-      setSaving(false);
-      return;
-    }
-
-    if (authMode === "supabase" && supabase && oldImagePath && isStoredProductImagePath(oldImagePath)) {
-      await supabase.storage.from(productImagesBucket).remove([oldImagePath]);
+    if (authMode === "demo") {
+      const saveError = await saveProductRecord(updatedProduct);
+      if (saveError) {
+        setError(saveError);
+        setSaving(false);
+        return;
+      }
+    } else if (supabase) {
+      const { error: imageUpdateError } = await supabase.rpc("set_product_image_path", {
+        target_product_id: productEditor.id,
+        next_image_path: null,
+      });
+      if (imageUpdateError) {
+        setError(imageUpdateError.message);
+        setSaving(false);
+        return;
+      }
+      if (oldImagePath && isStoredProductImagePath(oldImagePath)) {
+        await supabase.storage.from(productImagesBucket).remove([oldImagePath]);
+      }
+      await refreshSupabaseData();
     }
 
     setSaving(false);
@@ -1414,6 +1796,9 @@ export function PipelineApp() {
   }
 
   async function handleQuickStatusUpdate(productId: string, status: ProductStatus) {
+    if (!requirePermission("move_stages", "move product stages")) {
+      return;
+    }
     const product = data.products.find((item) => item.id === productId);
     if (!product) {
       return;
@@ -1445,10 +1830,10 @@ export function PipelineApp() {
       return;
     }
 
-    const { error: updateError } = await supabase
-      .from("products")
-      .update(toProductRow(nextProduct))
-      .eq("id", productId);
+    const { error: updateError } = await supabase.rpc("update_product_stage", {
+      target_product_id: productId,
+      next_status: status,
+    });
 
     if (updateError) {
       setError(updateError.message);
@@ -1462,6 +1847,9 @@ export function PipelineApp() {
     productId: string,
     workflowAction: WorkflowAction | null,
   ) {
+    if (!requirePermission("edit_products", "edit next actions")) {
+      return;
+    }
     const product = data.products.find((item) => item.id === productId);
     if (!product) {
       return;
@@ -1528,6 +1916,9 @@ export function PipelineApp() {
   }
 
   async function handleSaveCalendarEvent() {
+    if (!requirePermission("manage_events", "manage calendar events")) {
+      return;
+    }
     if (!calendarEventDraft.dropDayId || !calendarEventDraft.title.trim() || !calendarEventDraft.date) {
       setError("Drop day, event title, and date are required.");
       return;
@@ -1558,7 +1949,7 @@ export function PipelineApp() {
         : null;
 
     if (previousDropDay && previousDropDay.id !== dropDay.id) {
-      const previousSaveError = await saveDropDayRecord({
+      const previousSaveError = await saveDropEventMetadata({
         ...previousDropDay,
         customEvents: previousDropDay.customEvents.filter((item) => item.id !== nextEvent.id),
       });
@@ -1578,7 +1969,7 @@ export function PipelineApp() {
       ].sort((left, right) => left.date.localeCompare(right.date)),
     };
 
-    const saveError = await saveDropDayRecord(nextDropDay);
+    const saveError = await saveDropEventMetadata(nextDropDay);
     if (saveError) {
       setError(saveError);
       setSaving(false);
@@ -1592,6 +1983,9 @@ export function PipelineApp() {
   }
 
   async function handleDeleteCalendarEvent() {
+    if (!requirePermission("manage_events", "manage calendar events")) {
+      return;
+    }
     if (!calendarEventDraft.id || !calendarEventDraft.dropDayId) {
       return;
     }
@@ -1610,7 +2004,7 @@ export function PipelineApp() {
       customEvents: dropDay.customEvents.filter((item) => item.id !== calendarEventDraft.id),
     };
 
-    const saveError = await saveDropDayRecord(nextDropDay);
+    const saveError = await saveDropEventMetadata(nextDropDay);
     if (saveError) {
       setError(saveError);
       setSaving(false);
@@ -1647,6 +2041,11 @@ export function PipelineApp() {
   }
 
   async function handleCalendarEventDrop(item: CalendarItem, targetDate: string) {
+    const permission =
+      item.kind === "custom-event" ? "manage_events" : "manage_calendar";
+    if (!requirePermission(permission, "move this calendar item")) {
+      return;
+    }
     if (!item.draggable) {
       return;
     }
@@ -1666,7 +2065,7 @@ export function PipelineApp() {
       setError("");
       setMessage("");
 
-      const saveError = await saveDropDayRecord({
+      const saveError = await saveDropEventMetadata({
         ...dropDay,
         customEvents: dropDay.customEvents
           .map((entry) => (entry.id === item.id ? { ...entry, date: targetDate } : entry))
@@ -1698,10 +2097,19 @@ export function PipelineApp() {
       setError("");
       setMessage("");
 
-      const saveError = await saveDropDayRecord({
-        ...dropDay,
-        targetDate,
-      });
+      let saveError: string | null = null;
+      if (authMode === "demo") {
+        saveError = await saveDropDayRecord({ ...dropDay, targetDate });
+      } else if (supabase) {
+        const { error: updateError } = await supabase.rpc("reschedule_drop_day", {
+          target_drop_day_id: dropDay.id,
+          next_target_date: targetDate,
+        });
+        saveError = updateError?.message ?? null;
+        if (!saveError) {
+          await refreshSupabaseData();
+        }
+      }
 
       if (saveError) {
         setError(saveError);
@@ -1758,7 +2166,20 @@ export function PipelineApp() {
     setError("");
     setMessage("");
 
-    const saveError = await saveProductRecord(updatedProduct);
+    let saveError: string | null = null;
+    if (authMode === "demo") {
+      saveError = await saveProductRecord(updatedProduct);
+    } else if (supabase) {
+      const { error: updateError } = await supabase.rpc("reschedule_product", {
+        target_product_id: product.id,
+        next_sample_ordered_at: updatedProduct.sampleOrderedAt,
+        next_bulk_start_date: updatedProduct.bulkStartDate,
+      });
+      saveError = updateError?.message ?? null;
+      if (!saveError) {
+        await refreshSupabaseData();
+      }
+    }
     if (saveError) {
       setError(saveError);
       setSaving(false);
@@ -1774,6 +2195,9 @@ export function PipelineApp() {
   }
 
   async function handleAddCostEntry() {
+    if (!requirePermission("add_costs", "add cost entries")) {
+      return;
+    }
     if (!selectedProductId) {
       setError("Pick a product before adding a cost entry.");
       return;
@@ -1809,7 +2233,7 @@ export function PipelineApp() {
                   ...selectedProductRecord,
                   activity: appendActivity(
                     selectedProductRecord,
-                    `Cost added: ${newEntry.title} (${currency(newEntry.amount)})`,
+                    `Cost added: ${newEntry.title}`,
                     activeUserEmail,
                   ),
                   updatedAt: new Date().toISOString(),
@@ -1849,12 +2273,12 @@ export function PipelineApp() {
     }
 
     const selectedProductRecord = data.products.find((product) => product.id === selectedProductId);
-    if (selectedProductRecord) {
+    if (selectedProductRecord && can("edit_products")) {
       await saveProductRecord({
         ...selectedProductRecord,
         activity: appendActivity(
           selectedProductRecord,
-          `Cost added: ${newEntry.title} (${currency(newEntry.amount)})`,
+          `Cost added: ${newEntry.title}`,
           activeUserEmail,
         ),
         updatedAt: new Date().toISOString(),
@@ -1889,6 +2313,9 @@ export function PipelineApp() {
   }
 
   async function handleSaveEditedCost() {
+    if (!requirePermission("edit_costs", "edit cost entries")) {
+      return;
+    }
     if (!costEditor.id || !selectedProductId) {
       return;
     }
@@ -1965,7 +2392,7 @@ export function PipelineApp() {
     }
 
     const selectedProductRecord = data.products.find((product) => product.id === selectedProductId);
-    if (selectedProductRecord) {
+    if (selectedProductRecord && can("edit_products")) {
       await saveProductRecord({
         ...selectedProductRecord,
         activity: appendActivity(selectedProductRecord, `Cost updated: ${nextEntry.title}`, activeUserEmail),
@@ -1979,6 +2406,9 @@ export function PipelineApp() {
   }
 
   async function handleDeleteCostEntry(entryId: string) {
+    if (!requirePermission("delete_costs", "delete cost entries")) {
+      return;
+    }
     const entry = data.costEntries.find((item) => item.id === entryId);
     if (!entry) {
       return;
@@ -2030,7 +2460,7 @@ export function PipelineApp() {
     }
 
     const selectedProductRecord = data.products.find((product) => product.id === entry.productId);
-    if (selectedProductRecord) {
+    if (selectedProductRecord && can("edit_products")) {
       await saveProductRecord({
         ...selectedProductRecord,
         activity: appendActivity(selectedProductRecord, `Cost deleted: ${entry.title}`, activeUserEmail),
@@ -2060,7 +2490,7 @@ export function PipelineApp() {
           type: "sample",
           kind: "sample-arrival",
           productId: product.id,
-          draggable: true,
+          draggable: canManageCalendar,
           dropDayId: product.dropDayId,
         });
       }
@@ -2073,7 +2503,7 @@ export function PipelineApp() {
           type: "bulk",
           kind: "bulk-ready",
           productId: product.id,
-          draggable: true,
+          draggable: canManageCalendar,
           dropDayId: product.dropDayId,
         });
       }
@@ -2086,7 +2516,7 @@ export function PipelineApp() {
           type: "arrival",
           kind: "arrival",
           productId: product.id,
-          draggable: true,
+          draggable: canManageCalendar,
           dropDayId: product.dropDayId,
         });
       }
@@ -2103,7 +2533,7 @@ export function PipelineApp() {
         type: "drop-day" as const,
         kind: "drop-day" as const,
         productId: null,
-        draggable: true,
+        draggable: canManageCalendar,
         dropDayId: dropDay.id,
       }));
 
@@ -2117,7 +2547,7 @@ export function PipelineApp() {
           type: "custom" as const,
           kind: "custom-event" as const,
           productId: null,
-          draggable: true,
+          draggable: canManageEvents,
           dropDayId: dropDay.id,
           notes: event.notes,
         })),
@@ -2126,7 +2556,7 @@ export function PipelineApp() {
     return [...productItems, ...dropItems, ...customEventItems].sort((left, right) =>
       left.date.localeCompare(right.date),
     );
-  }, [filteredProducts, scope, visibleDropDays]);
+  }, [canManageCalendar, canManageEvents, filteredProducts, scope, visibleDropDays]);
 
   const dashboardCalendarAgenda = useMemo(() => {
     const upcomingItems = calendarItems.filter((item) => (daysUntil(item.date) ?? 999) >= 0);
@@ -2213,6 +2643,37 @@ export function PipelineApp() {
     );
   }
 
+  if (
+    authMode === "supabase" &&
+    isAuthenticated &&
+    membership?.status !== "active"
+  ) {
+    const removed = membership?.status === "removed";
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-stone-100 px-4 text-slate-900">
+        <div className="w-full max-w-lg rounded-[28px] border border-slate-200 bg-white p-8 text-center shadow-sm">
+          <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700">
+            {removed ? "Access removed" : "Approval pending"}
+          </span>
+          <h1 className="mt-5 text-3xl font-semibold">
+            {removed ? "Your workspace access has been removed" : "Your request is awaiting approval"}
+          </h1>
+          <p className="mt-3 text-sm text-slate-600">
+            {removed
+              ? "Contact the store administrator if you believe this was a mistake."
+              : "An administrator must approve your account before you can view products, costs, or schedules."}
+          </p>
+          <button
+            className="mt-6 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+            onClick={() => void handleSignOut()}
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-stone-100 text-slate-900">
       <div className="mx-auto max-w-[1600px] px-4 py-5 lg:px-6">
@@ -2227,7 +2688,9 @@ export function PipelineApp() {
                   {activeUserEmail}
                 </span>
               </div>
-              <h1 className="text-3xl font-semibold tracking-tight">Order Buddy</h1>
+              <h1 className="text-3xl font-semibold tracking-tight">
+                {workspaceSettings.storeName}
+              </h1>
               <p className="mt-2 max-w-3xl text-sm text-slate-600">
                 Track golf apparel ideas, samples, production, arrival windows, and total
                 product costs in one shared workflow.
@@ -2253,7 +2716,9 @@ export function PipelineApp() {
             <section className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm">
               <p className="mb-3 text-sm font-medium text-slate-700">Views</p>
               <div className="space-y-2">
-                {navItems.map((item) => {
+                {navItems
+                  .filter((item) => item.id !== "settings" || isAdmin)
+                  .map((item) => {
                   const Icon = item.icon;
                   return (
                     <button
@@ -2341,6 +2806,7 @@ export function PipelineApp() {
                 filteredProducts={filteredProducts}
                 dashboardAgenda={dashboardAgenda}
                 calendarAgendaItems={dashboardCalendarAgenda}
+                canViewTotalCosts={can("view_total_costs")}
                 onOpenStatCard={(kind) => {
                   if (kind === "ideas") {
                     openProductsShortcut({ status: "idea" });
@@ -2401,13 +2867,13 @@ export function PipelineApp() {
                           Open selected product
                         </button>
                       ) : null}
-                      <button
+                      {can("create_products") ? <button
                         className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300"
                         onClick={() => setShowAddProductModal(true)}
                       >
                         <Plus className="h-4 w-4" />
                         New product
-                      </button>
+                      </button> : null}
                     </div>
                   </div>
                 </Card>
@@ -2453,7 +2919,9 @@ export function PipelineApp() {
                         options={[
                           { value: "next-action", label: "Nearest milestone" },
                           { value: "name", label: "Name" },
-                          { value: "cost-high", label: "Highest cost" },
+                          ...(can("view_total_costs")
+                            ? [{ value: "cost-high", label: "Highest cost" }]
+                            : []),
                           { value: "newest", label: "Newest first" },
                         ]}
                       />
@@ -2520,6 +2988,8 @@ export function PipelineApp() {
                     onSelectProduct={openProduct}
                     onMoveStatus={handleQuickStatusUpdate}
                     selectedProductId={selectedProductId}
+                    canMoveStages={can("move_stages")}
+                    canViewTotalCosts={can("view_total_costs")}
                   />
                 ) : (
                   <ProductListView
@@ -2529,6 +2999,9 @@ export function PipelineApp() {
                     onMoveStatus={handleQuickStatusUpdate}
                     onChangeNextAction={handleQuickWorkflowActionUpdate}
                     selectedProductId={selectedProductId}
+                    canMoveStages={can("move_stages")}
+                    canEditProducts={can("edit_products")}
+                    canViewTotalCosts={can("view_total_costs")}
                   />
                 )}
               </>
@@ -2545,6 +3018,7 @@ export function PipelineApp() {
                 onAddCustomEvent={openNewCalendarEvent}
                 onEventClick={(item) => void handleCalendarEventOpen(item)}
                 onEventDrop={(item, targetDate) => void handleCalendarEventDrop(item, targetDate)}
+                canManageEvents={can("manage_events")}
               />
             ) : null}
 
@@ -2558,13 +3032,13 @@ export function PipelineApp() {
                         assign products into that drop from the products page.
                       </p>
                     </div>
-                    <button
+                    {can("manage_drop_days") ? <button
                       className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300"
                       onClick={openNewDropDayModal}
                     >
                       <Plus className="h-4 w-4" />
                       New drop day
-                    </button>
+                    </button> : null}
                   </div>
                 </Card>
 
@@ -2579,8 +3053,38 @@ export function PipelineApp() {
                   onToggleArchive={(dropDayId, archived) =>
                     void toggleDropArchive(dropDayId, archived)
                   }
+                  canManageDrops={can("manage_drop_days")}
+                  canViewTotalCosts={can("view_total_costs")}
                 />
               </>
+            ) : null}
+
+            {view === "settings" && isAdmin ? (
+              <SettingsView
+                storeName={storeNameDraft}
+                members={workspaceMembers}
+                invitations={workspaceInvitations}
+                inviteEmail={inviteEmail}
+                inviteRole={inviteRole}
+                invitePermissions={invitePermissions}
+                saving={saving}
+                onStoreNameChange={setStoreNameDraft}
+                onSaveStoreName={() => void handleSaveWorkspaceName(storeNameDraft)}
+                onMemberChange={(nextMember) =>
+                  setWorkspaceMembers((current) =>
+                    current.map((member) =>
+                      member.userId === nextMember.userId ? nextMember : member,
+                    ),
+                  )
+                }
+                onSaveMember={(nextMember) =>
+                  void handleUpdateWorkspaceMember(nextMember)
+                }
+                onInviteEmailChange={setInviteEmail}
+                onInviteRoleChange={setInviteRole}
+                onInvitePermissionsChange={setInvitePermissions}
+                onSendInvite={() => void handleSendWorkspaceInvitation()}
+              />
             ) : null}
           </main>
         </div>
@@ -2874,6 +3378,13 @@ export function PipelineApp() {
           startEditingCost={startEditingCost}
           handleDeleteCostEntry={handleDeleteCostEntry}
           cancelEditingCost={cancelEditingCost}
+          canEditProducts={can("edit_products")}
+          canManageImages={can("manage_images")}
+          canAddCosts={can("add_costs")}
+          canEditCosts={can("edit_costs")}
+          canDeleteCosts={can("delete_costs")}
+          canViewCostAmounts={can("view_cost_amounts")}
+          canViewTotalCosts={can("view_total_costs")}
           onClose={() => {
             setShowProductDrawer(false);
             cancelEditingCost();
@@ -2884,11 +3395,272 @@ export function PipelineApp() {
   );
 }
 
+function SettingsView({
+  storeName,
+  members,
+  invitations,
+  inviteEmail,
+  inviteRole,
+  invitePermissions,
+  saving,
+  onStoreNameChange,
+  onSaveStoreName,
+  onMemberChange,
+  onSaveMember,
+  onInviteEmailChange,
+  onInviteRoleChange,
+  onInvitePermissionsChange,
+  onSendInvite,
+}: {
+  storeName: string;
+  members: WorkspaceMember[];
+  invitations: WorkspaceInvitation[];
+  inviteEmail: string;
+  inviteRole: WorkspaceRole;
+  invitePermissions: WorkspacePermissions;
+  saving: boolean;
+  onStoreNameChange: (value: string) => void;
+  onSaveStoreName: () => void;
+  onMemberChange: (member: WorkspaceMember) => void;
+  onSaveMember: (member: WorkspaceMember) => void;
+  onInviteEmailChange: (value: string) => void;
+  onInviteRoleChange: (value: WorkspaceRole) => void;
+  onInvitePermissionsChange: (permissions: WorkspacePermissions) => void;
+  onSendInvite: () => void;
+}) {
+  return (
+    <div className="space-y-6">
+      <Card title="Store Settings">
+        <div className="flex max-w-2xl flex-col gap-3 sm:flex-row sm:items-end">
+          <div className="flex-1">
+            <Input label="Store name" value={storeName} onChange={onStoreNameChange} />
+          </div>
+          <button
+            className="rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 disabled:opacity-60"
+            onClick={onSaveStoreName}
+            disabled={saving || !storeName.trim()}
+          >
+            Save store name
+          </button>
+        </div>
+      </Card>
+
+      <Card title="Invite a User">
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_220px_auto] lg:items-end">
+          <Input
+            label="Email address"
+            type="email"
+            value={inviteEmail}
+            onChange={onInviteEmailChange}
+          />
+          <Select
+            label="Role"
+            value={inviteRole}
+            onChange={(value) => onInviteRoleChange(value as WorkspaceRole)}
+            options={[
+              { value: "member", label: "Member" },
+              { value: "admin", label: "Administrator" },
+            ]}
+          />
+          <button
+            className="inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 disabled:opacity-60"
+            onClick={onSendInvite}
+            disabled={saving || !inviteEmail.trim()}
+          >
+            <UserPlus className="h-4 w-4" />
+            Send invitation
+          </button>
+        </div>
+        {inviteRole === "member" ? (
+          <PermissionChecklist
+            permissions={invitePermissions}
+            onChange={onInvitePermissionsChange}
+          />
+        ) : (
+          <p className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+            Administrators always have full workspace access.
+          </p>
+        )}
+      </Card>
+
+      <Card title="Authorized and Pending Users">
+        <div className="space-y-4">
+          {members.map((member) => (
+            <div
+              key={member.userId}
+              className="rounded-3xl border border-slate-200 bg-slate-50 p-5"
+            >
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-medium text-slate-900">{member.email}</p>
+                    <StatusBadge label={member.role} tone={member.role === "admin" ? "green" : "slate"} />
+                    <StatusBadge
+                      label={member.status}
+                      tone={
+                        member.status === "active"
+                          ? "green"
+                          : member.status === "pending"
+                            ? "amber"
+                            : "rose"
+                      }
+                    />
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Added {formatDate(member.createdAt.slice(0, 10))}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Select
+                    label="Role"
+                    value={member.role}
+                    onChange={(value) =>
+                      onMemberChange({ ...member, role: value as WorkspaceRole })
+                    }
+                    options={[
+                      { value: "member", label: "Member" },
+                      { value: "admin", label: "Administrator" },
+                    ]}
+                  />
+                  {member.status === "pending" ? (
+                    <button
+                      className="self-end rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950"
+                      onClick={() => onSaveMember({ ...member, status: "active" })}
+                      disabled={saving}
+                    >
+                      Approve
+                    </button>
+                  ) : member.status === "removed" ? (
+                    <button
+                      className="self-end rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700"
+                      onClick={() => onSaveMember({ ...member, status: "active" })}
+                      disabled={saving}
+                    >
+                      Restore
+                    </button>
+                  ) : (
+                    <button
+                      className="self-end rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700"
+                      onClick={() => onSaveMember({ ...member, status: "removed" })}
+                      disabled={saving}
+                    >
+                      Remove access
+                    </button>
+                  )}
+                  <button
+                    className="self-end rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700"
+                    onClick={() => onSaveMember(member)}
+                    disabled={saving}
+                  >
+                    Save access
+                  </button>
+                </div>
+              </div>
+              {member.role === "member" ? (
+                <PermissionChecklist
+                  permissions={member.permissions}
+                  onChange={(permissions) => onMemberChange({ ...member, permissions })}
+                />
+              ) : (
+                <p className="mt-4 text-sm text-slate-600">
+                  Administrators always have full workspace access.
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <Card title="Invitations">
+        <div className="space-y-3">
+          {invitations.length ? (
+            invitations.map((invitation) => (
+              <div
+                key={invitation.id}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4"
+              >
+                <div>
+                  <p className="font-medium text-slate-900">{invitation.email}</p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Expires {formatDate(invitation.expiresAt.slice(0, 10))}
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <StatusBadge label={invitation.role} tone="slate" />
+                  <StatusBadge
+                    label={invitation.status}
+                    tone={invitation.status === "pending" ? "amber" : "green"}
+                  />
+                </div>
+              </div>
+            ))
+          ) : (
+            <EmptyState title="No invitations yet" description="Invitations you send will appear here." />
+          )}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function PermissionChecklist({
+  permissions,
+  onChange,
+}: {
+  permissions: WorkspacePermissions;
+  onChange: (permissions: WorkspacePermissions) => void;
+}) {
+  return (
+    <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+      {workspacePermissionOptions.map((option) => (
+        <label
+          key={option.key}
+          className="flex cursor-pointer items-start gap-3 rounded-2xl border border-slate-200 bg-white p-3"
+        >
+          <input
+            type="checkbox"
+            className="mt-1 h-4 w-4 accent-emerald-500"
+            checked={permissions[option.key]}
+            onChange={(event) =>
+              onChange({ ...permissions, [option.key]: event.target.checked })
+            }
+          />
+          <span>
+            <span className="block text-sm font-medium text-slate-900">{option.label}</span>
+            <span className="mt-1 block text-xs text-slate-500">{option.description}</span>
+          </span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function StatusBadge({
+  label,
+  tone,
+}: {
+  label: string;
+  tone: "green" | "amber" | "rose" | "slate";
+}) {
+  const tones = {
+    green: "border-emerald-200 bg-emerald-50 text-emerald-700",
+    amber: "border-amber-200 bg-amber-50 text-amber-700",
+    rose: "border-rose-200 bg-rose-50 text-rose-700",
+    slate: "border-slate-200 bg-white text-slate-600",
+  };
+  return (
+    <span className={cn("rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.14em]", tones[tone])}>
+      {label}
+    </span>
+  );
+}
+
 function DashboardView({
   scopeLabel,
   filteredProducts,
   dashboardAgenda,
   calendarAgendaItems,
+  canViewTotalCosts,
   onOpenStatCard,
   onOpenAgendaProduct,
   onOpenCalendarItem,
@@ -2897,6 +3669,7 @@ function DashboardView({
   filteredProducts: ProductWithCosts[];
   dashboardAgenda: PlanningAgendaItem[];
   calendarAgendaItems: CalendarItem[];
+  canViewTotalCosts: boolean;
   onOpenStatCard: (kind: "ideas" | "samples" | "bulk" | "cost") => void;
   onOpenAgendaProduct: (productId: string) => void;
   onOpenCalendarItem: (item: CalendarItem) => void;
@@ -2932,10 +3705,10 @@ function DashboardView({
         />
         <StatCard
           label="Tracked cost"
-          value={currency(totalTrackedCost)}
-          description="Across selected scope"
+          value={canViewTotalCosts ? currency(totalTrackedCost) : "Hidden"}
+          description={canViewTotalCosts ? "Across selected scope" : "Cost access restricted"}
           icon={Receipt}
-          onClick={() => onOpenStatCard("cost")}
+          onClick={canViewTotalCosts ? () => onOpenStatCard("cost") : undefined}
         />
       </div>
 
@@ -3077,6 +3850,13 @@ function ProductDrawer({
   startEditingCost,
   handleDeleteCostEntry,
   cancelEditingCost,
+  canEditProducts,
+  canManageImages,
+  canAddCosts,
+  canEditCosts,
+  canDeleteCosts,
+  canViewCostAmounts,
+  canViewTotalCosts,
   onClose,
 }: {
   open: boolean;
@@ -3099,11 +3879,24 @@ function ProductDrawer({
   startEditingCost: (entry: CostEntry) => void;
   handleDeleteCostEntry: (entryId: string) => Promise<void>;
   cancelEditingCost: () => void;
+  canEditProducts: boolean;
+  canManageImages: boolean;
+  canAddCosts: boolean;
+  canEditCosts: boolean;
+  canDeleteCosts: boolean;
+  canViewCostAmounts: boolean;
+  canViewTotalCosts: boolean;
   onClose: () => void;
 }) {
   if (!open || !productEditor || !selectedProduct) {
     return null;
   }
+
+  const visibleActivity = canViewCostAmounts
+    ? selectedProduct.activity
+    : selectedProduct.activity.filter(
+        (entry) => !/^Cost (added|updated|deleted):/i.test(entry.message),
+      );
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/15 backdrop-blur-sm">
@@ -3139,7 +3932,15 @@ function ProductDrawer({
 
         <div className="space-y-5 p-5">
           <div className="inline-flex rounded-2xl border border-slate-200 bg-slate-50 p-1">
-            {(["overview", "timeline", "costs", "activity"] as DrawerTab[]).map((tab) => (
+            {(["overview", "timeline", "costs", "activity"] as DrawerTab[])
+              .filter(
+                (tab) =>
+                  tab !== "costs" ||
+                  canAddCosts ||
+                  canViewCostAmounts ||
+                  canViewTotalCosts,
+              )
+              .map((tab) => (
               <button
                 key={tab}
                 className={cn(
@@ -3152,7 +3953,7 @@ function ProductDrawer({
               >
                 {tab}
               </button>
-            ))}
+              ))}
           </div>
 
           {drawerTab === "overview" ? (
@@ -3172,7 +3973,7 @@ function ProductDrawer({
                       </p>
                     </div>
 
-                    <label className="block">
+                    {canManageImages ? <label className="block">
                       <span className="mb-2 block text-sm text-slate-600">Upload image file</span>
                       <input
                         className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 file:mr-4 file:rounded-xl file:border-0 file:bg-emerald-400 file:px-3 file:py-2 file:text-sm file:font-medium file:text-slate-950 hover:file:bg-emerald-300"
@@ -3181,9 +3982,11 @@ function ProductDrawer({
                         onChange={(event) => void handleProductImageUpload(event)}
                         disabled={saving}
                       />
-                    </label>
+                    </label> : (
+                      <p className="text-sm text-slate-500">Image changes are restricted.</p>
+                    )}
 
-                    {productEditor.imagePath ? (
+                    {canManageImages && productEditor.imagePath ? (
                       <button
                         className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-70"
                         onClick={() => void handleRemoveProductImage()}
@@ -3195,7 +3998,15 @@ function ProductDrawer({
                   </div>
                 </div>
 
-                <div className="grid gap-3">
+                {!canEditProducts ? (
+                  <p className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+                    Product details are read-only for your account.
+                  </p>
+                ) : null}
+                <fieldset
+                  disabled={!canEditProducts}
+                  className={cn("grid gap-3", !canEditProducts && "opacity-70")}
+                >
                   <Input
                     label="Product name"
                     value={productEditor.name}
@@ -3322,14 +4133,17 @@ function ProductDrawer({
                       setProductEditor((current) => (current ? { ...current, notes: value } : current))
                     }
                   />
-                </div>
+                </fieldset>
               </div>
             </Card>
           ) : null}
 
           {drawerTab === "timeline" ? (
             <Card title="Timeline">
-              <div className="space-y-4">
+              <fieldset
+                disabled={!canEditProducts}
+                className={cn("space-y-4", !canEditProducts && "opacity-70")}
+              >
                 <div className="grid gap-3 sm:grid-cols-3">
                   <Input
                     label="Sample ordered"
@@ -3399,14 +4213,14 @@ function ProductDrawer({
                   />
                 </div>
                 <TimelineSummary product={productEditor} />
-              </div>
+              </fieldset>
             </Card>
           ) : null}
 
           {drawerTab === "costs" ? (
             <Card title="Costs">
               <div className="space-y-4">
-                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                {canViewTotalCosts ? <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
                   <p className="text-xs uppercase tracking-[0.2em] text-emerald-700">
                     Total product cost
                   </p>
@@ -3416,8 +4230,9 @@ function ProductDrawer({
                   <p className="mt-1 text-sm text-emerald-700/80">
                     {selectedProduct.costs.length} expense entries for {selectedProduct.name}
                   </p>
-                </div>
+                </div> : null}
 
+                {canAddCosts || (canEditCosts && costEditor.id) ? (
                 <div className="rounded-2xl border border-slate-200 bg-white p-4">
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <p className="font-medium text-slate-900">
@@ -3522,8 +4337,9 @@ function ProductDrawer({
                     {costEditor.id ? "Save cost changes" : "Add cost entry"}
                   </button>
                 </div>
+                ) : null}
 
-                <div className="space-y-3">
+                {canViewCostAmounts ? <div className="space-y-3">
                   {selectedProduct.costs.length ? (
                     [...selectedProduct.costs]
                       .sort((left, right) => right.entryDate.localeCompare(left.entryDate))
@@ -3551,18 +4367,18 @@ function ProductDrawer({
                           <div className="mt-3 flex items-center justify-between gap-3">
                             <p className="text-xs text-slate-500">{formatDate(entry.entryDate)}</p>
                             <div className="flex gap-2">
-                              <button
+                              {canEditCosts ? <button
                                 className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
                                 onClick={() => startEditingCost(entry)}
                               >
                                 Edit
-                              </button>
-                              <button
+                              </button> : null}
+                              {canDeleteCosts ? <button
                                 className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700 transition hover:bg-rose-100"
                                 onClick={() => void handleDeleteCostEntry(entry.id)}
                               >
                                 Delete
-                              </button>
+                              </button> : null}
                             </div>
                           </div>
                         </div>
@@ -3573,7 +4389,11 @@ function ProductDrawer({
                       description="Add sample, material, freight, or packaging costs to understand total landed cost."
                     />
                   )}
-                </div>
+                </div> : (
+                  <p className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+                    Cost entry amounts are hidden for your account. You can still add an expense if permitted, but its amount will not be shown afterward.
+                  </p>
+                )}
               </div>
             </Card>
           ) : null}
@@ -3581,8 +4401,8 @@ function ProductDrawer({
           {drawerTab === "activity" ? (
             <Card title="Activity">
               <div className="space-y-3">
-                {selectedProduct.activity.length ? (
-                  selectedProduct.activity.map((entry) => (
+                {visibleActivity.length ? (
+                  visibleActivity.map((entry) => (
                     <div key={entry.id} className="rounded-2xl border border-slate-200 bg-white p-4">
                       <p className="font-medium text-slate-900">{entry.message}</p>
                       <p className="mt-2 text-sm text-slate-600">{entry.user}</p>
@@ -3599,7 +4419,7 @@ function ProductDrawer({
             </Card>
           ) : null}
 
-          <div className="flex justify-end">
+          {canEditProducts ? <div className="flex justify-end">
             <button
               className="rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-70"
               onClick={() => void handleSaveProduct()}
@@ -3607,7 +4427,7 @@ function ProductDrawer({
             >
               Save changes
             </button>
-          </div>
+          </div> : null}
         </div>
       </div>
     </div>
@@ -3620,12 +4440,16 @@ function ProductBoard({
   onSelectProduct,
   onMoveStatus,
   selectedProductId,
+  canMoveStages,
+  canViewTotalCosts,
 }: {
   products: ProductWithCosts[];
   dropDays: DropDay[];
   onSelectProduct: (product: ProductWithCosts) => void;
   onMoveStatus: (productId: string, status: ProductStatus) => void;
   selectedProductId: string | null;
+  canMoveStages: boolean;
+  canViewTotalCosts: boolean;
 }) {
   return (
     <div className="grid gap-4 xl:grid-cols-5">
@@ -3675,9 +4499,11 @@ function ProductBoard({
                                 {product.category}
                               </p>
                             </div>
-                            <span className="shrink-0 rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-600">
-                              {currency(getProductTotalCost(product))}
-                            </span>
+                            {canViewTotalCosts ? (
+                              <span className="shrink-0 rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-600">
+                                {currency(getProductTotalCost(product))}
+                              </span>
+                            ) : null}
                           </div>
 
                           <p className="mt-2 truncate text-xs text-slate-500">
@@ -3716,7 +4542,7 @@ function ProductBoard({
                             </p>
                           </div>
 
-                          <div className="mt-3">
+                          {canMoveStages ? <div className="mt-3">
                             <Select
                               label="Move to"
                               value={product.status}
@@ -3729,7 +4555,7 @@ function ProductBoard({
                               }))}
                               compact
                             />
-                          </div>
+                          </div> : null}
                         </div>
                       </div>
                     </button>
@@ -3756,6 +4582,9 @@ function ProductListView({
   onMoveStatus,
   onChangeNextAction,
   selectedProductId,
+  canMoveStages,
+  canEditProducts,
+  canViewTotalCosts,
 }: {
   products: ProductWithCosts[];
   dropDays: DropDay[];
@@ -3763,6 +4592,9 @@ function ProductListView({
   onMoveStatus: (productId: string, status: ProductStatus) => void;
   onChangeNextAction: (productId: string, action: WorkflowAction | null) => void;
   selectedProductId: string | null;
+  canMoveStages: boolean;
+  canEditProducts: boolean;
+  canViewTotalCosts: boolean;
 }) {
   return (
     <Card title="Products List">
@@ -3848,7 +4680,7 @@ function ProductListView({
                         {product.priority}
                       </span>
                     </div>
-                    <Select
+                    {canEditProducts ? <Select
                       label="Next action"
                       value={nextActionValue}
                       onChange={(value) => {
@@ -3862,7 +4694,11 @@ function ProductListView({
                       }}
                       options={nextActionOptions}
                       compact
-                    />
+                    /> : (
+                      <p className="truncate text-sm text-slate-700">
+                        {getProductNextAction(product)}
+                      </p>
+                    )}
                     {!product.nextAction.trim() && !product.workflowAction ? (
                       <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-slate-400">
                         Automatic
@@ -3880,11 +4716,11 @@ function ProductListView({
                   </div>
 
                   <div className="text-sm font-medium text-slate-900">
-                    {currency(getProductTotalCost(product))}
+                    {canViewTotalCosts ? currency(getProductTotalCost(product)) : "Hidden"}
                   </div>
 
                   <div>
-                    <Select
+                    {canMoveStages ? <Select
                       label="Move to"
                       value={product.status}
                       onChange={(value) =>
@@ -3895,7 +4731,11 @@ function ProductListView({
                         label: getStatusLabel(item),
                       }))}
                       compact
-                    />
+                    /> : (
+                      <span className={cn("rounded-full border px-2 py-1 text-[11px]", getStatusBadgeClasses(product.status))}>
+                        {getStatusLabel(product.status)}
+                      </span>
+                    )}
                   </div>
                 </div>
               );
@@ -3966,6 +4806,7 @@ function CalendarView({
   onAddCustomEvent,
   onEventClick,
   onEventDrop,
+  canManageEvents,
 }: {
   calendarMonth: Date;
   onPrevious: () => void;
@@ -3976,6 +4817,7 @@ function CalendarView({
   onAddCustomEvent: () => void;
   onEventClick: (item: CalendarItem) => void;
   onEventDrop: (item: CalendarItem, targetDate: string) => void;
+  canManageEvents: boolean;
 }) {
   const calendarStart = startOfWeek(startOfMonth(calendarMonth), { weekStartsOn: 0 });
   const calendarEnd = endOfWeek(endOfMonth(calendarMonth), { weekStartsOn: 0 });
@@ -4013,13 +4855,13 @@ function CalendarView({
           </button>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <button
+          {canManageEvents ? <button
             className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300"
             onClick={onAddCustomEvent}
           >
             <Plus className="h-4 w-4" />
             Add event
-          </button>
+          </button> : null}
           <div className="inline-flex rounded-2xl border border-slate-200 bg-slate-50 p-1">
             <button
               className={cn(
@@ -4210,12 +5052,16 @@ function DropDayOverview({
   onOpenDrop,
   onEditDrop,
   onToggleArchive,
+  canManageDrops,
+  canViewTotalCosts,
 }: {
   dropDays: DropDay[];
   products: ProductWithCosts[];
   onOpenDrop: (dropDayId: string) => void;
   onEditDrop: (dropDay: DropDay) => void;
   onToggleArchive: (dropDayId: string, archived: boolean) => void;
+  canManageDrops: boolean;
+  canViewTotalCosts: boolean;
 }) {
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -4234,14 +5080,14 @@ function DropDayOverview({
             >
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <div className="flex items-center gap-2">
+                  {canManageDrops ? <div className="flex items-center gap-2">
                     <h3 className="text-xl font-semibold text-slate-900">{dropDay.name}</h3>
                     {dropDay.archived ? (
                       <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-600">
                         Archived
                       </span>
                     ) : null}
-                  </div>
+                  </div> : null}
                   <p className="mt-2 text-sm text-slate-600">{dropDay.description}</p>
                 </div>
                 <div className="flex flex-col items-end gap-2">
@@ -4287,7 +5133,7 @@ function DropDayOverview({
                 />
                 <MiniMetric
                   label="Tracked cost"
-                  value={currency(totalCost)}
+                  value={canViewTotalCosts ? currency(totalCost) : "Hidden"}
                   accent="text-emerald-700"
                 />
               </div>

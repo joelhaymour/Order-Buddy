@@ -13,15 +13,25 @@ import type {
   ProductWithCosts,
 } from "@/lib/types";
 
-export function attachCosts(products: Product[], costEntries: CostEntry[]) {
+export function attachCosts(
+  products: Product[],
+  costEntries: CostEntry[],
+  totals?: Record<string, number> | null,
+) {
   return products.map((product) => ({
     ...product,
     costs: costEntries.filter((cost) => cost.productId === product.id),
+    totalCost:
+      totals === undefined
+        ? costEntries
+            .filter((cost) => cost.productId === product.id)
+            .reduce((sum, cost) => sum + clampNumber(cost.amount), 0)
+        : totals?.[product.id] ?? null,
   }));
 }
 
 export function getProductTotalCost(product: ProductWithCosts) {
-  return product.costs.reduce((sum, cost) => sum + clampNumber(cost.amount), 0);
+  return product.totalCost ?? 0;
 }
 
 export function getStatusLabel(status: ProductStatus) {

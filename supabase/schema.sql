@@ -65,26 +65,8 @@ alter table public.drop_days enable row level security;
 alter table public.products enable row level security;
 alter table public.cost_entries enable row level security;
 
-create policy "authenticated users can manage drop days"
-on public.drop_days
-for all
-to authenticated
-using (true)
-with check (true);
-
-create policy "authenticated users can manage products"
-on public.products
-for all
-to authenticated
-using (true)
-with check (true);
-
-create policy "authenticated users can manage cost entries"
-on public.cost_entries
-for all
-to authenticated
-using (true)
-with check (true);
+-- Workspace membership and permission policies are installed by
+-- workspace-access-controls.sql after these base tables are created.
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values (
@@ -100,13 +82,6 @@ set
   file_size_limit = excluded.file_size_limit,
   allowed_mime_types = excluded.allowed_mime_types;
 
-drop policy if exists "authenticated users can upload product images" on storage.objects;
-create policy "authenticated users can upload product images"
-on storage.objects
-for insert
-to authenticated
-with check (bucket_id = 'product-images');
-
 drop policy if exists "authenticated users can view product images" on storage.objects;
 create policy "authenticated users can view product images"
 on storage.objects
@@ -114,17 +89,4 @@ for select
 to authenticated
 using (bucket_id = 'product-images');
 
-drop policy if exists "authenticated users can update product images" on storage.objects;
-create policy "authenticated users can update product images"
-on storage.objects
-for update
-to authenticated
-using (bucket_id = 'product-images')
-with check (bucket_id = 'product-images');
-
-drop policy if exists "authenticated users can delete product images" on storage.objects;
-create policy "authenticated users can delete product images"
-on storage.objects
-for delete
-to authenticated
-using (bucket_id = 'product-images');
+-- Image write policies are installed by workspace-access-controls.sql.
