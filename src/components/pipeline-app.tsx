@@ -414,6 +414,10 @@ function getAutomaticProductNextAction(product: Product) {
       return "Add shipping timing";
     }
 
+    if ((daysUntil(timeline.arrivalDate) ?? 0) < 0) {
+      return "Bulk received";
+    }
+
     return "Track delivery";
   }
 
@@ -3786,7 +3790,7 @@ function ProductListView({
                   : []),
                 {
                   value: "",
-                  label: `Automatic (${getAutomaticProductNextAction(product)})`,
+                  label: getAutomaticProductNextAction(product),
                 },
                 ...workflowActionOptions.slice(1),
               ];
@@ -3859,6 +3863,11 @@ function ProductListView({
                       options={nextActionOptions}
                       compact
                     />
+                    {!product.nextAction.trim() && !product.workflowAction ? (
+                      <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-slate-400">
+                        Automatic
+                      </p>
+                    ) : null}
                   </div>
 
                   <div className="min-w-0">
