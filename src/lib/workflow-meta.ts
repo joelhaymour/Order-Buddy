@@ -6,18 +6,25 @@ import type {
   DropDay,
   Product,
   ProductPriority,
+  WorkflowAction,
 } from "@/lib/types";
+import { workflowActions } from "@/lib/types";
 
 const META_PREFIX = "\n\n<!--ORDER_BUDDY_META:";
 const META_SUFFIX = "-->";
 
 type ProductMeta = {
+  workflowAction?: WorkflowAction | null;
   nextAction?: string;
   owner?: string;
   priority?: ProductPriority;
   dueDate?: string | null;
   activity?: ActivityEntry[];
 };
+
+function isWorkflowAction(value: unknown): value is WorkflowAction {
+  return typeof value === "string" && workflowActions.some((action) => action === value);
+}
 
 type DropMeta = {
   archived?: boolean;
@@ -72,13 +79,16 @@ function packMetaValue(content: string, meta: unknown) {
 
 export function parseProductNotes(value: string | null | undefined): Pick<
   Product,
-  "notes" | "nextAction" | "owner" | "priority" | "dueDate" | "activity"
+  "notes" | "workflowAction" | "nextAction" | "owner" | "priority" | "dueDate" | "activity"
 > {
   const { content, meta } = splitMetaValue(value);
   const productMeta = (meta as ProductMeta | null) ?? {};
 
   return {
     notes: content,
+    workflowAction: isWorkflowAction(productMeta.workflowAction)
+      ? productMeta.workflowAction
+      : null,
     nextAction: productMeta.nextAction ?? "",
     owner: productMeta.owner ?? "",
     priority: productMeta.priority ?? "medium",
@@ -89,9 +99,10 @@ export function parseProductNotes(value: string | null | undefined): Pick<
 
 export function serializeProductNotes(product: Pick<
   Product,
-  "notes" | "nextAction" | "owner" | "priority" | "dueDate" | "activity"
+  "notes" | "workflowAction" | "nextAction" | "owner" | "priority" | "dueDate" | "activity"
 >) {
   return packMetaValue(product.notes, {
+    workflowAction: product.workflowAction,
     nextAction: product.nextAction,
     owner: product.owner,
     priority: product.priority,

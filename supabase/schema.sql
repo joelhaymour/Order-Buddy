@@ -15,7 +15,7 @@ create table if not exists public.products (
   category text not null,
   supplier text not null default '',
   image_path text,
-  status text not null check (status in ('idea', 'sample', 'bulk', 'canceled')),
+  status text not null check (status in ('idea', 'sample', 'bulk', 'launched', 'canceled')),
   drop_day_id uuid references public.drop_days(id) on delete set null,
   notes text not null default '',
   sample_ordered_at date,

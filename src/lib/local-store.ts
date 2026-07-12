@@ -17,6 +17,10 @@ function normalizeAppData(data: AppData): AppData {
       archived: Boolean(dropDay.archived),
       customEvents: Array.isArray(dropDay.customEvents) ? dropDay.customEvents : [],
     })),
+    products: data.products.map((product) => ({
+      ...product,
+      workflowAction: product.workflowAction ?? null,
+    })),
   };
 }
 

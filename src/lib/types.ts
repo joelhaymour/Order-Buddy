@@ -2,7 +2,18 @@ export const productStatuses = [
   "idea",
   "sample",
   "bulk",
+  "launched",
   "canceled",
+] as const;
+
+export const workflowActions = [
+  "order-first-sample",
+  "first-sample-ordered",
+  "sample-revision",
+  "bulk-ordered",
+  "track-delivery",
+  "bulk-received",
+  "launched",
 ] as const;
 
 export const costTypes = [
@@ -14,6 +25,7 @@ export const costTypes = [
 ] as const;
 
 export type ProductStatus = (typeof productStatuses)[number];
+export type WorkflowAction = (typeof workflowActions)[number];
 export type CostType = (typeof costTypes)[number];
 export type ProductPriority = "low" | "medium" | "high" | "urgent";
 
@@ -75,6 +87,7 @@ export type Product = {
   productionDays: number;
   shippingDays: number;
   targetLaunchDate: string | null;
+  workflowAction: WorkflowAction | null;
   nextAction: string;
   owner: string;
   priority: ProductPriority;
@@ -110,6 +123,7 @@ export type ProductDraft = {
   productionDays: number;
   shippingDays: number;
   targetLaunchDate: string | null;
+  workflowAction: WorkflowAction | null;
   nextAction: string;
   owner: string;
   priority: ProductPriority;

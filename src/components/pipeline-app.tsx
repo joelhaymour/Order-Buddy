@@ -65,8 +65,9 @@ import type {
   ProductDraft,
   ProductStatus,
   ProductWithCosts,
+  WorkflowAction,
 } from "@/lib/types";
-import { costTypes, productStatuses } from "@/lib/types";
+import { costTypes, productStatuses, workflowActions } from "@/lib/types";
 import {
   parseDropDescription,
   parseProductNotes,
@@ -175,6 +176,24 @@ const productPriorityOptions: { value: ProductPriority; label: string }[] = [
   { value: "urgent", label: "Urgent" },
 ];
 
+const workflowActionLabels: Record<WorkflowAction, string> = {
+  "order-first-sample": "Order first sample",
+  "first-sample-ordered": "First sample ordered",
+  "sample-revision": "Sample revision",
+  "bulk-ordered": "Bulk ordered",
+  "track-delivery": "Track delivery",
+  "bulk-received": "Bulk received",
+  launched: "Launched",
+};
+
+const workflowActionOptions = [
+  { value: "", label: "Automatic (recommended)" },
+  ...workflowActions.map((action) => ({
+    value: action,
+    label: workflowActionLabels[action],
+  })),
+];
+
 const SAVED_FILTERS_KEY = "order-buddy-saved-filters";
 const SAMPLE_REVIEW_BUFFER_DAYS = 3;
 
@@ -201,6 +220,7 @@ const emptyProductDraft: ProductDraft = {
   productionDays: 0,
   shippingDays: 0,
   targetLaunchDate: null,
+  workflowAction: null,
   nextAction: "",
   owner: "",
   priority: "medium",
@@ -262,6 +282,7 @@ function mapProductRow(row: ProductRow): Product {
     productionDays: row.production_days ?? 0,
     shippingDays: row.shipping_days ?? 0,
     targetLaunchDate: row.target_launch_date,
+    workflowAction: workflowMeta.workflowAction,
     nextAction: workflowMeta.nextAction,
     owner: workflowMeta.owner,
     priority: workflowMeta.priority,
@@ -352,17 +373,20 @@ function getProductPrimaryMilestone(product: Product, dropDays: DropDay[]) {
         };
   }
 
+  if (product.status === "launched") {
+    return {
+      label: "Launch date",
+      date: assignedDropDate,
+    };
+  }
+
   return {
     label: "Last update",
     date: product.updatedAt.slice(0, 10),
   };
 }
 
-function getProductNextAction(product: Product) {
-  if (product.nextAction.trim()) {
-    return product.nextAction.trim();
-  }
-
+function getAutomaticProductNextAction(product: Product) {
   const timeline = getProductTimeline(product);
 
   if (product.status === "idea") {
@@ -393,7 +417,23 @@ function getProductNextAction(product: Product) {
     return "Track delivery";
   }
 
+  if (product.status === "launched") {
+    return "Launched";
+  }
+
   return "No action";
+}
+
+function getProductNextAction(product: Product) {
+  if (product.nextAction.trim()) {
+    return product.nextAction.trim();
+  }
+
+  if (product.workflowAction) {
+    return workflowActionLabels[product.workflowAction];
+  }
+
+  return getAutomaticProductNextAction(product);
 }
 
 function getPriorityBadgeClasses(priority: ProductPriority) {
@@ -455,6 +495,8 @@ function getStatusBadgeClasses(status: ProductStatus) {
       return "border-cyan-200 bg-cyan-50 text-cyan-700";
     case "bulk":
       return "border-amber-200 bg-amber-50 text-amber-700";
+    case "launched":
+      return "border-emerald-200 bg-emerald-50 text-emerald-700";
     case "canceled":
       return "border-rose-200 bg-rose-50 text-rose-700";
     default:
@@ -649,7 +691,7 @@ export function PipelineApp() {
     return filteredProducts
       .flatMap((product) => {
         const dropDate = getAssignedDropDate(data.dropDays, product.dropDayId);
-        if (!dropDate || product.status === "canceled") {
+        if (!dropDate || product.status === "canceled" || product.status === "launched") {
           return [];
         }
 
@@ -1596,6 +1638,32 @@ export function PipelineApp() {
       return;
     }
 
+    if (item.kind === "drop-day" && item.dropDayId) {
+      const dropDay = data.dropDays.find((entry) => entry.id === item.dropDayId);
+      if (!dropDay) {
+        return;
+      }
+
+      setSaving(true);
+      setError("");
+      setMessage("");
+
+      const saveError = await saveDropDayRecord({
+        ...dropDay,
+        targetDate,
+      });
+
+      if (saveError) {
+        setError(saveError);
+        setSaving(false);
+        return;
+      }
+
+      setSaving(false);
+      setMessage(`${dropDay.name} moved to ${formatDate(targetDate)}.`);
+      return;
+    }
+
     if (!item.productId) {
       return;
     }
@@ -1985,7 +2053,7 @@ export function PipelineApp() {
         type: "drop-day" as const,
         kind: "drop-day" as const,
         productId: null,
-        draggable: false,
+        draggable: true,
         dropDayId: dropDay.id,
       }));
 
@@ -2554,8 +2622,19 @@ export function PipelineApp() {
                   }))
                 }
               />
+              <Select
+                label="Next action"
+                value={productDraft.workflowAction ?? ""}
+                onChange={(value) =>
+                  setProductDraft((current) => ({
+                    ...current,
+                    workflowAction: (value || null) as WorkflowAction | null,
+                  }))
+                }
+                options={workflowActionOptions}
+              />
               <Input
-                label="Manual next action"
+                label="Manual next action (overrides dropdown)"
                 value={productDraft.nextAction}
                 onChange={(value) =>
                   setProductDraft((current) => ({ ...current, nextAction: value }))
@@ -3143,9 +3222,30 @@ function ProductDrawer({
                       options={productPriorityOptions}
                     />
                   </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <Select
+                      label="Next action"
+                      value={productEditor.workflowAction ?? ""}
+                      onChange={(value) =>
+                        setProductEditor((current) =>
+                          current
+                            ? {
+                                ...current,
+                                workflowAction: (value || null) as WorkflowAction | null,
+                              }
+                            : current,
+                        )
+                      }
+                      options={[
+                        {
+                          value: "",
+                          label: `Automatic (${getAutomaticProductNextAction(productEditor)})`,
+                        },
+                        ...workflowActionOptions.slice(1),
+                      ]}
+                    />
                     <Input
-                      label="Manual next action"
+                      label="Manual next action (overrides dropdown)"
                       value={productEditor.nextAction}
                       onChange={(value) =>
                         setProductEditor((current) =>
@@ -3477,7 +3577,7 @@ function ProductBoard({
   selectedProductId: string | null;
 }) {
   return (
-    <div className="grid gap-4 xl:grid-cols-4">
+    <div className="grid gap-4 xl:grid-cols-5">
       {productStatuses.map((status) => {
         const statusProducts = products.filter((product) => product.status === status);
 

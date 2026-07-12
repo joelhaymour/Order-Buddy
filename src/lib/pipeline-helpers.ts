@@ -32,6 +32,8 @@ export function getStatusLabel(status: ProductStatus) {
       return "Sample";
     case "bulk":
       return "Bulk";
+    case "launched":
+      return "Launched";
     case "canceled":
       return "Canceled";
     default:
