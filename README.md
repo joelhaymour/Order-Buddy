@@ -32,17 +32,35 @@ If you do not set Supabase environment variables, the app runs in demo mode usin
 ## Enable shared live data with Supabase
 
 1. Create a Supabase project.
-2. In the Supabase SQL editor, run `supabase/schema.sql`.
-3. Copy `.env.example` to `.env.local`.
-4. Add:
+2. In the Supabase SQL editor, run these files in order:
+   - `supabase/schema.sql`
+   - `supabase/workspace-access-controls.sql`
+   - `supabase/workspace-access-hardening.sql`
+3. Initialize the store before its administrator signs up:
+
+```sql
+select public.bootstrap_workspace(
+  'owner@example.com',
+  'Store Name'
+);
+```
+
+Only the database owner or Supabase `service_role` can execute this function. It refuses
+to replace a different active administrator.
+
+4. Deploy `supabase/functions/invite-workspace-user/index.ts` as the
+   `invite-workspace-user` Edge Function with JWT verification enabled.
+5. Copy `.env.example` to `.env.local`.
+6. Add:
 
 ```bash
 NEXT_PUBLIC_SUPABASE_URL=your-project-url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
 ```
 
-5. Restart the app.
-6. Use the sign-up screen to create the first two user accounts for you and your business partner.
+7. Restart the app.
+8. The configured owner can create an account and becomes the administrator. Other direct
+   sign-ups remain pending until approved; emailed invitations are pre-approved.
 
 If you are adding product images to an existing project that already ran the original schema, also run:
 
@@ -70,3 +88,23 @@ Once deployed with Supabase configured, both users can sign in and work in the s
 If you connect the repository to Vercel for automatic Git-based deploys, make sure new commits use the same email address as your GitHub account so Vercel can identify the author correctly.
 
 The project is intended to be deployed from the `main` branch in Vercel.
+
+## Deploying the same app for another brand
+
+Use one GitHub repository, but create a separate Supabase project and a separate Vercel
+project for every brand. Do not use Git branches as a data-isolation boundary.
+
+For each brand:
+
+1. Create an empty Supabase project.
+2. Apply the schema and workspace SQL files in the order above.
+3. Call `bootstrap_workspace` with that brand's store name and owner email.
+4. Deploy the invitation Edge Function to that Supabase project.
+5. Create a new Vercel project connected to this repository's `main` branch.
+6. Set that Vercel project's `NEXT_PUBLIC_SUPABASE_URL` and
+   `NEXT_PUBLIC_SUPABASE_ANON_KEY` to the matching Supabase project.
+7. Deploy and verify that the new instance has no products, drops, costs, users, or images
+   from any other brand.
+
+This arrangement shares application updates while keeping databases, authentication,
+files, environment variables, deployments, and rollbacks independent.

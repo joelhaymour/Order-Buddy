@@ -25,6 +25,7 @@ revoke execute on function public.has_workspace_permission(text) from public, an
 revoke execute on function public.handle_new_workspace_user() from public, anon, authenticated;
 revoke execute on function public.admin_update_workspace_name(text) from anon;
 revoke execute on function public.admin_update_member(uuid, text, text, jsonb) from anon;
+revoke execute on function public.bootstrap_workspace(text, text) from public, anon, authenticated;
 revoke execute on function public.reschedule_drop_day(uuid, date) from anon;
 revoke execute on function public.reschedule_product(uuid, date, date) from anon;
 revoke execute on function public.update_product_stage(uuid, text) from public, anon;
@@ -35,6 +36,7 @@ grant execute on function public.update_product_stage(uuid, text) to authenticat
 grant execute on function public.is_active_workspace_member() to authenticated;
 grant execute on function public.is_workspace_admin() to authenticated;
 grant execute on function public.has_workspace_permission(text) to authenticated;
+grant execute on function public.bootstrap_workspace(text, text) to service_role;
 
 drop policy if exists "authenticated users can view product images" on storage.objects;
 drop policy if exists "active members can view product images" on storage.objects;

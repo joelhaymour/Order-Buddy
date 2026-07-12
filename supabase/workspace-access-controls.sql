@@ -24,9 +24,13 @@ $$;
 create table if not exists public.workspace_settings (
   id boolean primary key default true check (id),
   store_name text not null default 'Order Buddy',
+  initial_admin_email text,
   updated_at timestamptz not null default timezone('utc', now()),
   updated_by uuid references auth.users(id)
 );
+
+alter table public.workspace_settings
+add column if not exists initial_admin_email text;
 
 insert into public.workspace_settings (id, store_name)
 values (true, 'Order Buddy')
@@ -121,10 +125,16 @@ set search_path = public
 as $$
 declare
   matching_invite public.workspace_invitations%rowtype;
+  configured_admin_email text;
   assigned_role text := 'member';
   assigned_status text := 'pending';
   assigned_permissions jsonb := public.default_workspace_permissions();
 begin
+  select initial_admin_email
+  into configured_admin_email
+  from public.workspace_settings
+  where id = true;
+
   select *
   into matching_invite
   from public.workspace_invitations
@@ -134,7 +144,8 @@ begin
   order by created_at desc
   limit 1;
 
-  if lower(new.email) = lower('joel@rouqesupport.com') then
+  if configured_admin_email is not null
+     and lower(new.email) = lower(configured_admin_email) then
     assigned_role := 'admin';
     assigned_status := 'active';
   elsif matching_invite.id is not null then
@@ -187,7 +198,14 @@ select
   id,
   email,
   coalesce(raw_user_meta_data ->> 'full_name', ''),
-  case when lower(email) = lower('joel@rouqesupport.com') then 'admin' else 'member' end,
+  case
+    when lower(email) = lower(coalesce((
+      select initial_admin_email
+      from public.workspace_settings
+      where id = true
+    ), '')) then 'admin'
+    else 'member'
+  end,
   'active',
   public.default_workspace_permissions()
 from auth.users
@@ -195,14 +213,88 @@ where email is not null
 on conflict (user_id) do update
 set email = excluded.email,
     role = case
-      when lower(excluded.email) = lower('joel@rouqesupport.com') then 'admin'
+      when lower(excluded.email) = lower(coalesce((
+        select initial_admin_email
+        from public.workspace_settings
+        where id = true
+      ), '')) then 'admin'
       else public.workspace_members.role
     end,
     status = case
-      when lower(excluded.email) = lower('joel@rouqesupport.com') then 'active'
+      when lower(excluded.email) = lower(coalesce((
+        select initial_admin_email
+        from public.workspace_settings
+        where id = true
+      ), '')) then 'active'
       else public.workspace_members.status
     end,
     updated_at = timezone('utc', now());
+
+create or replace function public.bootstrap_workspace(
+  initial_admin_email text,
+  initial_store_name text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  normalized_email text := lower(trim(initial_admin_email));
+  existing_admin_email text;
+begin
+  if normalized_email = '' or position('@' in normalized_email) = 0 then
+    raise exception 'A valid initial administrator email is required';
+  end if;
+  if length(trim(initial_store_name)) = 0 then
+    raise exception 'Store name is required';
+  end if;
+
+  select email
+  into existing_admin_email
+  from public.workspace_members
+  where role = 'admin' and status = 'active'
+  order by created_at
+  limit 1;
+
+  if existing_admin_email is not null
+     and lower(existing_admin_email) <> normalized_email then
+    raise exception 'This workspace already has a different active administrator';
+  end if;
+
+  update public.workspace_settings
+  set store_name = trim(initial_store_name),
+      initial_admin_email = normalized_email,
+      updated_at = timezone('utc', now()),
+      updated_by = null
+  where id = true;
+
+  insert into public.workspace_members (
+    user_id,
+    email,
+    full_name,
+    role,
+    status,
+    permissions
+  )
+  select
+    id,
+    email,
+    coalesce(raw_user_meta_data ->> 'full_name', ''),
+    'admin',
+    'active',
+    public.default_workspace_permissions()
+  from auth.users
+  where lower(email) = normalized_email
+  on conflict (user_id) do update
+  set email = excluded.email,
+      full_name = excluded.full_name,
+      role = 'admin',
+      status = 'active',
+      permissions = public.default_workspace_permissions(),
+      updated_at = timezone('utc', now());
+end;
+$$;
 
 create or replace function public.admin_update_workspace_name(next_store_name text)
 returns void
@@ -379,6 +471,7 @@ $$;
 
 revoke all on function public.admin_update_workspace_name(text) from public;
 revoke all on function public.admin_update_member(uuid, text, text, jsonb) from public;
+revoke all on function public.bootstrap_workspace(text, text) from public;
 revoke all on function public.reschedule_drop_day(uuid, date) from public;
 revoke all on function public.reschedule_product(uuid, date, date) from public;
 revoke all on function public.update_product_stage(uuid, text) from public;
@@ -388,6 +481,7 @@ revoke all on function public.get_product_cost_totals() from public;
 
 grant execute on function public.admin_update_workspace_name(text) to authenticated;
 grant execute on function public.admin_update_member(uuid, text, text, jsonb) to authenticated;
+grant execute on function public.bootstrap_workspace(text, text) to service_role;
 grant execute on function public.reschedule_drop_day(uuid, date) to authenticated;
 grant execute on function public.reschedule_product(uuid, date, date) to authenticated;
 grant execute on function public.update_product_stage(uuid, text) to authenticated;
