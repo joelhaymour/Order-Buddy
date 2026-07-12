@@ -37,6 +37,17 @@ grant execute on function public.is_workspace_admin() to authenticated;
 grant execute on function public.has_workspace_permission(text) to authenticated;
 
 drop policy if exists "authenticated users can view product images" on storage.objects;
+drop policy if exists "active members can view product images" on storage.objects;
+create policy "active members can view product images"
+on storage.objects for select to authenticated
+using (
+  bucket_id = 'product-images'
+  and public.is_active_workspace_member()
+);
+
+update storage.buckets
+set public = false
+where id = 'product-images';
 
 create index if not exists workspace_members_invited_by_idx
 on public.workspace_members(invited_by);

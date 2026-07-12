@@ -483,8 +483,16 @@ on public.cost_entries for delete to authenticated
 using (public.has_workspace_permission('delete_costs'));
 
 drop policy if exists "authenticated users can upload product images" on storage.objects;
+drop policy if exists "authenticated users can view product images" on storage.objects;
 drop policy if exists "authenticated users can update product images" on storage.objects;
 drop policy if exists "authenticated users can delete product images" on storage.objects;
+drop policy if exists "active members can view product images" on storage.objects;
+create policy "active members can view product images"
+on storage.objects for select to authenticated
+using (
+  bucket_id = 'product-images'
+  and public.is_active_workspace_member()
+);
 create policy "permitted members can upload product images"
 on storage.objects for insert to authenticated
 with check (

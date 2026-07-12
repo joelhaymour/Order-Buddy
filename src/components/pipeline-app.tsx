@@ -55,6 +55,7 @@ import {
 } from "@/lib/pipeline-helpers";
 import {
   getProductImageUrl,
+  getProductImageSignedUrl,
   getSupabaseBrowserClient,
   isSupabaseConfigured,
   productImagesBucket,
@@ -4763,7 +4764,19 @@ function ProductImagePreview({
   productName: string;
   variant: "card" | "detail" | "list";
 }) {
-  const imageUrl = getProductImageUrl(imagePath);
+  const [imageUrl, setImageUrl] = useState(() => getProductImageUrl(imagePath));
+
+  useEffect(() => {
+    let active = true;
+    void getProductImageSignedUrl(imagePath).then((nextUrl) => {
+      if (active) {
+        setImageUrl(nextUrl);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [imagePath]);
   const sizeClasses =
     variant === "card"
       ? "h-14 w-14 shrink-0 rounded-2xl"
