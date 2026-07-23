@@ -470,7 +470,9 @@ function getAutomaticProductNextAction(product: Product) {
       return "Add sample timing";
     }
 
-    return "Review sample";
+    return (daysUntil(timeline.sampleArrivalDate) ?? 0) > 0
+      ? "First sample ordered"
+      : "Review sample";
   }
 
   if (product.status === "bulk") {
@@ -478,11 +480,19 @@ function getAutomaticProductNextAction(product: Product) {
       return "Set bulk start";
     }
 
-    if (!timeline.arrivalDate) {
+    if (!timeline.bulkReadyDate) {
+      return "Add production timing";
+    }
+
+    if (product.shippingDays <= 0 || !timeline.arrivalDate) {
       return "Add shipping timing";
     }
 
-    if ((daysUntil(timeline.arrivalDate) ?? 0) < 0) {
+    if ((daysUntil(timeline.bulkReadyDate) ?? 0) > 0) {
+      return "Bulk ordered";
+    }
+
+    if ((daysUntil(timeline.arrivalDate) ?? 0) <= 0) {
       return "Bulk received";
     }
 
