@@ -160,7 +160,7 @@ const costEntries: CostEntry[] = [
     description: "Performance knit fabric reservation",
     amount: 420,
     entryDate: iso(-6),
-    costType: "materials",
+    costType: "bulk",
     createdAt: new Date().toISOString(),
   },
   {
@@ -170,7 +170,7 @@ const costEntries: CostEntry[] = [
     description: "Projected bulk shipping cost",
     amount: 210,
     entryDate: iso(22),
-    costType: "freight",
+    costType: "shipping",
     createdAt: new Date().toISOString(),
   },
   {

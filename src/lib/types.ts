@@ -18,9 +18,9 @@ export const workflowActions = [
 
 export const costTypes = [
   "sample",
-  "materials",
-  "packaging",
-  "freight",
+  "shipping",
+  "duties",
+  "bulk",
   "misc",
 ] as const;
 

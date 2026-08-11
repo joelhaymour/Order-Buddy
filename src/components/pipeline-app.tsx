@@ -4397,7 +4397,7 @@ function ProductDrawer({
                   ) : (
                     <EmptyState
                       title="No costs yet"
-                      description="Add sample, material, freight, or packaging costs to understand total landed cost."
+                      description="Add sample, shipping, duties, bulk, or miscellaneous costs to understand total landed cost."
                     />
                   )}
                 </div> : (

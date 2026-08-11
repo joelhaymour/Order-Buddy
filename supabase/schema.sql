@@ -36,7 +36,7 @@ create table if not exists public.cost_entries (
   description text not null default '',
   amount numeric(12, 2) not null check (amount >= 0),
   entry_date date not null,
-  cost_type text not null check (cost_type in ('sample', 'materials', 'packaging', 'freight', 'misc')),
+  cost_type text not null check (cost_type in ('sample', 'shipping', 'duties', 'bulk', 'misc')),
   created_at timestamptz not null default timezone('utc', now())
 );
 
